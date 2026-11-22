@@ -585,3 +585,154 @@ export function buildItemAnalysisExcel(report: ExamAnalysisReport): Buffer {
 
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
+
+export function buildExamGradingExcel(examId: number): Buffer | null {
+  const exam = db.prepare(`
+    SELECT e.*, qb.title as bank_title, qb.subject
+    FROM exams e
+    JOIN question_banks qb ON qb.id = e.bank_id
+    WHERE e.id = ?
+  `).get(examId) as any;
+
+  if (!exam) return null;
+
+  const questions = db.prepare(`
+    SELECT id, q_type, max_score, sort_order
+    FROM questions
+    WHERE bank_id = ?
+    ORDER BY sort_order ASC, id ASC
+  `).all(exam.bank_id) as Array<{ id: number; q_type: string; max_score: number; sort_order: number }>;
+
+  const sessions = db.prepare(`
+    SELECT es.*, u.username, u.full_name, u.class_name
+    FROM exam_sessions es
+    JOIN users u ON u.id = es.student_id
+    WHERE es.exam_id = ?
+    ORDER BY u.class_name ASC, u.full_name ASC, es.id ASC
+  `).all(examId) as any[];
+
+  const answers = db.prepare(`
+    SELECT session_id, question_id, auto_score, manual_score, is_manually_graded
+    FROM student_answers
+    WHERE exam_id = ?
+  `).all(examId) as Array<{
+    session_id: number;
+    question_id: number;
+    auto_score: number;
+    manual_score: number | null;
+    is_manually_graded: number;
+  }>;
+
+  const ansMap = new Map<string, number>();
+  for (const a of answers) {
+    const score = a.is_manually_graded && a.manual_score !== null ? a.manual_score : a.auto_score;
+    ansMap.set(`${a.session_id}:${a.question_id}`, Number(score || 0));
+  }
+
+  const maxPossible = questions.reduce((acc, q) => acc + (Number(q.max_score) || 0), 0);
+  const scores = sessions.map((s) => Number(s.final_score || 0));
+  const avgScore = scores.length > 0 ? Number((scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2)) : 0;
+  const maxScore = scores.length > 0 ? Math.max(...scores) : 0;
+  const minScore = scores.length > 0 ? Math.min(...scores) : 0;
+
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Rekap Nilai Peserta
+  const headerBlock: (string | number)[][] = [
+    ['REKAP NILAI PESERTA UJIAN - MKC CBT'],
+    ['Judul Ujian', exam.title || '-'],
+    ['Mata Pelajaran', exam.subject || '-'],
+    ['Bank Soal', exam.bank_title || '-'],
+    ['Token Ujian', exam.token_code || '-'],
+    ['Jumlah Soal / Skor Maksimal', `${questions.length} Soal (${maxPossible} Poin)`],
+    ['Jumlah Peserta Tercatat', sessions.length],
+    ['Rata-Rata Nilai', avgScore],
+    ['Nilai Tertinggi / Terendah', `${maxScore} / ${minScore}`],
+    ['Tanggal Ekspor', new Date().toLocaleString('id-ID')],
+    [],
+    [
+      'No',
+      'Username / NIS',
+      'Nama Lengkap',
+      'Kelas',
+      'Status Sesi',
+      'Status Koreksi',
+      'Pelanggaran',
+      'Nilai Otomatis',
+      'Penyesuaian Manual',
+      'Nilai Akhir',
+      'Waktu Mulai',
+      'Waktu Selesai',
+    ],
+  ];
+
+  sessions.forEach((s, idx) => {
+    headerBlock.push([
+      idx + 1,
+      s.username || '',
+      s.full_name || '',
+      s.class_name || '',
+      s.status || '',
+      s.grading_status || '',
+      Number(s.violation_count || 0),
+      Number(s.auto_score || 0),
+      Number(s.manual_score_adjustment || 0),
+      Number(s.final_score || 0),
+      s.started_at || '-',
+      s.submitted_at || '-',
+    ]);
+  });
+
+  const wsRekap = XLSX.utils.aoa_to_sheet(headerBlock);
+  wsRekap['!cols'] = [
+    { wch: 6 },
+    { wch: 18 },
+    { wch: 28 },
+    { wch: 16 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 13 },
+    { wch: 22 },
+    { wch: 22 },
+  ];
+  XLSX.utils.book_append_sheet(wb, wsRekap, 'Rekap Nilai');
+
+  // Sheet 2: Rincian Skor Per Soal
+  const detailRows = sessions.map((s, idx) => {
+    const row: Record<string, string | number> = {
+      'No': idx + 1,
+      'Username / NIS': s.username || '',
+      'Nama Lengkap': s.full_name || '',
+      'Kelas': s.class_name || '',
+    };
+    questions.forEach((q, qIdx) => {
+      const colLabel = `S${qIdx + 1} (${q.q_type})`;
+      row[colLabel] = ansMap.get(`${s.id}:${q.id}`) ?? 0;
+    });
+    row['Penyesuaian Manual'] = Number(s.manual_score_adjustment || 0);
+    row['Nilai Akhir'] = Number(s.final_score || 0);
+    return row;
+  });
+
+  const wsDetail = XLSX.utils.json_to_sheet(
+    detailRows.length > 0
+      ? detailRows
+      : [{ Info: 'Belum ada peserta yang mengerjakan ujian ini.' }]
+  );
+  wsDetail['!cols'] = [
+    { wch: 5 },
+    { wch: 18 },
+    { wch: 28 },
+    { wch: 14 },
+    ...questions.map(() => ({ wch: 11 })),
+    { wch: 18 },
+    { wch: 13 },
+  ];
+  XLSX.utils.book_append_sheet(wb, wsDetail, 'Skor Per Soal');
+
+  return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+}
+

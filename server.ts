@@ -17,7 +17,7 @@ import {
 } from './server/crypto.js';
 import { db, getUplDirs, initDatabase, seedInitialSimulationData } from './server/db.js';
 import { gradeQuestionAnswer, QuestionType } from './server/grading.js';
-import { buildItemAnalysisExcel, computeExamItemAnalysis } from './server/itemAnalysis.js';
+import { buildExamGradingExcel, buildItemAnalysisExcel, computeExamItemAnalysis } from './server/itemAnalysis.js';
 import { generateWordTemplateBuffer, parseWordDocx } from './server/wordImport.js';
 
 initDatabase();
@@ -1005,6 +1005,23 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  app.delete('/api/teacher/exams/:examId', requireAuth, requireRole('guru', 'admin'), (req: AuthenticatedRequest, res) => {
+    const examId = Number(req.params.examId);
+    const exam = db.prepare('SELECT id, owner_id FROM exams WHERE id = ?').get(examId) as { id: number; owner_id: number } | undefined;
+    if (!exam) {
+      res.status(404).json({ error: 'Jadwal ujian tidak ditemukan.' });
+      return;
+    }
+    if (req.user!.role !== 'admin' && exam.owner_id !== req.user!.userId) {
+      res.status(403).json({ error: 'Akses ditolak: Anda tidak berhak menghapus jadwal ujian guru lain.' });
+      return;
+    }
+
+    db.prepare('DELETE FROM exams WHERE id = ?').run(examId);
+    invalidateExamCacheByExamId(examId);
+    res.json({ ok: true });
+  });
+
   // Manual & Automatic Grading View for an Exam
   app.get('/api/teacher/exams/:examId/grading', requireAuth, requireRole('guru', 'admin'), (req: AuthenticatedRequest, res) => {
     const examId = Number(req.params.examId);
@@ -1032,6 +1049,31 @@ async function startServer() {
     `).all(exam.bank_id);
 
     res.json({ exam, sessions, questions });
+  });
+
+  app.get('/api/teacher/exams/:examId/grading/excel', requireAuth, requireRole('guru', 'admin'), (req: AuthenticatedRequest, res) => {
+    const examId = Number(req.params.examId);
+    const exam = db.prepare('SELECT id, owner_id, title FROM exams WHERE id = ?').get(examId) as
+      | { id: number; owner_id: number; title: string }
+      | undefined;
+    if (!exam) {
+      res.status(404).json({ error: 'Ujian tidak ditemukan.' });
+      return;
+    }
+    if (req.user!.role !== 'admin' && exam.owner_id !== req.user!.userId) {
+      res.status(403).json({ error: 'Akses ditolak: Anda tidak memiliki akses ke hasil ujian guru lain.' });
+      return;
+    }
+
+    const buf = buildExamGradingExcel(examId);
+    if (!buf) {
+      res.status(404).json({ error: 'Data nilai ujian tidak ditemukan.' });
+      return;
+    }
+    const safeTitle = exam.title.replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 40);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Rekap_Nilai_${safeTitle}.xlsx"`);
+    res.send(buf);
   });
 
   app.get('/api/teacher/sessions/:sessionId/answers', requireAuth, requireRole('guru', 'admin'), (req: AuthenticatedRequest, res) => {

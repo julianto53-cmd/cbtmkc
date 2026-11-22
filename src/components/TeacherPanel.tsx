@@ -40,6 +40,7 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   const [bankTitle, setBankTitle] = useState('');
   const [bankSubject, setBankSubject] = useState('');
   const [bankGrade, setBankGrade] = useState('XII');
+  const [confirmDeleteBankId, setConfirmDeleteBankId] = useState<number | null>(null);
 
   // Word Import Preview State
   const [previewItems, setPreviewItems] = useState<ParsedWordQuestion[] | null>(null);
@@ -99,6 +100,7 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   const [editEndAt, setEditEndAt] = useState('');
   const [editAllClasses, setEditAllClasses] = useState(true);
   const [editSelectedClasses, setEditSelectedClasses] = useState<string[]>([]);
+  const [confirmDeleteExamId, setConfirmDeleteExamId] = useState<number | null>(null);
 
   // Grading State
   const [gradingExamId, setGradingExamId] = useState<number | null>(null);
@@ -272,6 +274,22 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
     await loadBanksAndExams();
   };
 
+  const handleDeleteBank = async (bankId: number) => {
+    setErrorMsg('');
+    try {
+      await apiFetch(`/api/teacher/banks/${bankId}`, { method: 'DELETE' });
+      setConfirmDeleteBankId(null);
+      if (selectedBankId === bankId) {
+        setSelectedBankId(null);
+        setQuestions([]);
+      }
+      setStatusMsg('Bank soal berhasil dihapus.');
+      await loadBanksAndExams();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal menghapus bank soal.');
+    }
+  };
+
   const handleWordUploadPreview = async (file: File) => {
     setErrorMsg('');
     setImportingWord(true);
@@ -370,6 +388,23 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
       await loadBanksAndExams();
     } catch (err: any) {
       setErrorMsg(err.message);
+    }
+  };
+
+  const handleDeleteExam = async (examId: number) => {
+    setErrorMsg('');
+    try {
+      await apiFetch(`/api/teacher/exams/${examId}`, { method: 'DELETE' });
+      setConfirmDeleteExamId(null);
+      if (editingExamId === examId) setEditingExamId(null);
+      if (gradingExamId === examId) {
+        setGradingExamId(null);
+        setGradingData(null);
+      }
+      setStatusMsg('Jadwal ujian berhasil dihapus.');
+      await loadBanksAndExams();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal menghapus jadwal ujian.');
     }
   };
 
@@ -525,25 +560,61 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                   <div className="text-xs text-slate-500 py-4 text-center">Belum ada bank soal. Buat bank soal pertama Anda.</div>
                 ) : (
                   banks.map((b) => (
-                    <button
+                    <div
                       key={b.id}
-                      type="button"
-                      onClick={() => setSelectedBankId(b.id)}
-                      className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                      className={`rounded-lg border transition-colors ${
                         selectedBankId === b.id
                           ? 'border-emerald-700 bg-emerald-50/70'
                           : 'border-slate-200 bg-white hover:bg-slate-50'
                       }`}
                     >
-                      <div className="text-sm font-semibold text-slate-900">{b.title}</div>
-                      <div className="text-xs text-slate-500 mt-1 flex items-center justify-between">
-                        <span>{b.subject} · {b.grade_level || 'Umum'}</span>
-                        <span className="font-mono font-semibold text-slate-700 tabular-nums">{b.question_count} Soal</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmDeleteBankId(null);
+                          setSelectedBankId(b.id);
+                        }}
+                        className="w-full text-left p-3 pb-2"
+                      >
+                        <div className="text-sm font-semibold text-slate-900">{b.title}</div>
+                        <div className="text-xs text-slate-500 mt-1 flex items-center justify-between">
+                          <span>{b.subject} · {b.grade_level || 'Umum'}</span>
+                          <span className="font-mono font-semibold text-slate-700 tabular-nums">{b.question_count} Soal</span>
+                        </div>
+                      </button>
+                      <div className="px-3 py-2 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-slate-400 truncate">
+                          {user.role === 'admin' && b.owner_name ? `Pemilik: ${b.owner_name}` : b.subject}
+                        </span>
+                        {confirmDeleteBankId === b.id ? (
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteBank(b.id)}
+                              className="px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white font-medium"
+                            >
+                              Ya, Hapus
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteBankId(null)}
+                              className="px-2 py-1 rounded border border-slate-300 bg-white text-slate-600"
+                            >
+                              Batal
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteBankId(b.id)}
+                            className="inline-flex items-center gap-1 text-red-600 hover:text-red-700 font-medium shrink-0"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hapus</span>
+                          </button>
+                        )}
                       </div>
-                      {user.role === 'admin' && b.owner_name && (
-                        <div className="text-[11px] text-slate-400 mt-1">Pemilik: {b.owner_name}</div>
-                      )}
-                    </button>
+                    </div>
                   ))
                 )}
               </div>
@@ -1293,14 +1364,15 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                     </div>
                   )}
 
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                  <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
                     <span className={`text-xs font-semibold ${ex.status === 'ACTIVE' ? 'text-emerald-700' : 'text-slate-500'}`}>
                       Status: {ex.status}
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
                         onClick={() => {
+                          setConfirmDeleteExamId(null);
                           if (isEditing) {
                             setEditingExamId(null);
                           } else {
@@ -1330,7 +1402,7 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                             });
                             loadBanksAndExams();
                           }}
-                          className="px-3 py-1.5 rounded bg-emerald-800 text-white text-xs font-medium whitespace-nowrap"
+                          className="px-3 py-1.5 rounded bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-medium whitespace-nowrap"
                         >
                           Aktifkan
                         </button>
@@ -1344,9 +1416,37 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                             });
                             loadBanksAndExams();
                           }}
-                          className="px-3 py-1.5 rounded border border-slate-300 text-xs font-medium text-slate-700 whitespace-nowrap"
+                          className="px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50 text-xs font-medium text-slate-700 whitespace-nowrap"
                         >
                           Tutup Ujian
+                        </button>
+                      )}
+
+                      {confirmDeleteExamId === ex.id ? (
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteExam(ex.id)}
+                            className="px-2.5 py-1.5 rounded bg-red-600 hover:bg-red-700 text-white text-xs font-medium whitespace-nowrap"
+                          >
+                            Ya, Hapus
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteExamId(null)}
+                            className="px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 whitespace-nowrap"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteExamId(ex.id)}
+                          className="px-3 py-1.5 rounded border border-red-200 text-red-700 hover:bg-red-50 text-xs font-medium inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Hapus</span>
                         </button>
                       )}
                     </div>
@@ -1376,20 +1476,34 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
             </div>
 
             {gradingExamId && (
-              <button
-                type="button"
-                onClick={async () => {
-                  const res = await apiFetch<{ regradedSessions: number }>(`/api/teacher/exams/${gradingExamId}/regrade-auto`, {
-                    method: 'POST',
-                  });
-                  setStatusMsg(`Berhasil menghitung ulang nilai otomatis untuk ${res.regradedSessions} peserta.`);
-                  loadGradingList(gradingExamId);
-                }}
-                className="px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Hitung Ulang Nilai Otomatis</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await apiFetch<{ regradedSessions: number }>(`/api/teacher/exams/${gradingExamId}/regrade-auto`, {
+                      method: 'POST',
+                    });
+                    setStatusMsg(`Berhasil menghitung ulang nilai otomatis untuk ${res.regradedSessions} peserta.`);
+                    loadGradingList(gradingExamId);
+                  }}
+                  className="px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Hitung Ulang Nilai Otomatis</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const selectedExam = exams.find((e) => e.id === gradingExamId);
+                    const safe = (selectedExam?.title || `Ujian_${gradingExamId}`).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 40);
+                    apiDownload(`/api/teacher/exams/${gradingExamId}/grading/excel`, `Rekap_Nilai_${safe}.xlsx`);
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white text-xs font-medium inline-flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Ekspor Nilai Excel (.xlsx)</span>
+                </button>
+              </div>
             )}
           </div>
 
