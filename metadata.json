@@ -1,0 +1,6 @@
+{
+  "name": "MKC CBT",
+  "description": "Platform Ujian Berbasis Komputer (CBT) MKC dengan keamanan layar penuh anti-curang, import soal Word & gambar, analisis butir soal lengkap, dan skalabilitas tinggi.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
