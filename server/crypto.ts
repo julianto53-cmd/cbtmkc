@@ -1,7 +1,12 @@
 import crypto from 'crypto';
 
-// Session signing secret: reads from process.env or generates an ephemeral in-memory 32-byte key
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+// Session signing secret: reads from SESSION_SECRET, or derives deterministically from DATABASE_URL on serverless, or generates ephemeral key locally
+const DB_CONN = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+const SESSION_SECRET =
+  process.env.SESSION_SECRET ||
+  (DB_CONN
+    ? crypto.createHmac('sha256', 'mkc-cbt-session-secret').update(DB_CONN).digest('hex')
+    : crypto.randomBytes(32).toString('hex'));
 
 // Encryption secret for stored API keys: reads from process.env or derives from session secret
 const ENC_KEY_SOURCE = process.env.API_KEY_ENC_SECRET || SESSION_SECRET;

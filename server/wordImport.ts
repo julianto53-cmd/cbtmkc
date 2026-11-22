@@ -110,7 +110,9 @@ function decodeHtmlEntities(str: string): string {
     .trim();
 }
 
-export async function parseWordDocx(buffer: Buffer, questionUploadsDir: string): Promise<ParsedWordQuestion[]> {
+export type WordImageSaver = (filename: string, mimeType: string, buffer: Buffer) => Promise<string>;
+
+export async function parseWordDocx(buffer: Buffer, saveImage: WordImageSaver): Promise<ParsedWordQuestion[]> {
   const allowedMimes: Record<string, string> = {
     'image/png': 'png',
     'image/jpeg': 'jpg',
@@ -123,15 +125,12 @@ export async function parseWordDocx(buffer: Buffer, questionUploadsDir: string):
     { buffer },
     {
       convertImage: mammoth.images.imgElement(async (image) => {
-        const ext = allowedMimes[image.contentType] || 'png';
+        const mimeType = image.contentType || 'image/png';
+        const ext = allowedMimes[mimeType] || 'png';
         const imgBuf = await image.read();
         const filename = `word_${crypto.randomUUID()}.${ext}`;
-        const dest = path.resolve(questionUploadsDir, filename);
-        if (!dest.startsWith(path.resolve(questionUploadsDir) + path.sep)) {
-          throw new Error('Invalid image path');
-        }
-        fs.writeFileSync(dest, imgBuf);
-        return { src: `/uploads/questions/${filename}` };
+        const url = await saveImage(filename, mimeType, imgBuf);
+        return { src: url };
       }),
     }
   );

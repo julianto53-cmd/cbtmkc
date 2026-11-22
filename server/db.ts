@@ -1,7 +1,17 @@
-import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import pg from 'pg';
 import { hashPassword } from './crypto.js';
+
+const { Pool } = pg;
+
+// Parse PostgreSQL BIGINT (OID 20) and NUMERIC (OID 1700) as JS numbers for parity with SQLite
+pg.types.setTypeParser(20, (val: string) => parseInt(val, 10));
+pg.types.setTypeParser(1700, (val: string) => parseFloat(val));
+
+const CONNECTION_STRING = (process.env.DATABASE_URL || process.env.POSTGRES_URL || '').trim();
+export const isPostgres = CONNECTION_STRING.length > 0;
+export const isVercel = Boolean(process.env.VERCEL);
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const UPLOADS_DIR = path.resolve(process.cwd(), 'uploads');
@@ -9,247 +19,699 @@ const QUESTION_UPLOADS_DIR = path.join(UPLOADS_DIR, 'questions');
 const SLIDER_UPLOADS_DIR = path.join(UPLOADS_DIR, 'slides');
 
 export function ensureDirectories() {
+  if (isVercel || isPostgres) return;
   for (const dir of [DATA_DIR, UPLOADS_DIR, QUESTION_UPLOADS_DIR, SLIDER_UPLOADS_DIR]) {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    } catch {
+      // Ignore read-only filesystem errors
     }
   }
 }
 
-ensureDirectories();
-
-const DB_PATH = path.join(DATA_DIR, 'mkc_cbt.db');
-export const db = new Database(DB_PATH);
-
-// High-concurrency SQLite tuning for 1000+ simultaneous exam connections
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
-db.pragma('busy_timeout = 15000');
-db.pragma('temp_store = MEMORY');
-db.pragma('cache_size = -64000');
-db.pragma('foreign_keys = ON');
-
-export function initDatabase() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-      full_name TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('admin', 'guru', 'pengawas', 'siswa')),
-      class_name TEXT NOT NULL DEFAULT '',
-      password_hash TEXT NOT NULL,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS login_slides (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      subtitle TEXT NOT NULL,
-      badge_label TEXT NOT NULL DEFAULT 'MKC CBT',
-      image_url TEXT NOT NULL,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      is_active INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS system_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      is_encrypted INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS question_banks (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      title TEXT NOT NULL,
-      subject TEXT NOT NULL,
-      grade_level TEXT NOT NULL DEFAULT '',
-      description TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS questions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
-      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      q_type TEXT NOT NULL CHECK(q_type IN ('PG', 'PGK', 'BS', 'JODOH', 'ISIAN', 'ESAI')),
-      prompt_text TEXT NOT NULL,
-      image_url TEXT NOT NULL DEFAULT '',
-      options_json TEXT NOT NULL DEFAULT '{}',
-      answer_key_json TEXT NOT NULL DEFAULT '{}',
-      max_score REAL NOT NULL DEFAULT 1,
-      difficulty_tag TEXT NOT NULL DEFAULT 'Sedang',
-      explanation TEXT NOT NULL DEFAULT '',
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS exams (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
-      owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      title TEXT NOT NULL,
-      token_code TEXT NOT NULL,
-      duration_minutes INTEGER NOT NULL DEFAULT 60,
-      max_violations INTEGER NOT NULL DEFAULT 3,
-      shuffle_questions INTEGER NOT NULL DEFAULT 1,
-      shuffle_options INTEGER NOT NULL DEFAULT 0,
-      show_result_to_student INTEGER NOT NULL DEFAULT 1,
-      status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'ACTIVE', 'CLOSED')),
-      target_classes TEXT NOT NULL DEFAULT 'ALL',
-      start_at TEXT NOT NULL DEFAULT '',
-      end_at TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE TABLE IF NOT EXISTS exam_sessions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      status TEXT NOT NULL DEFAULT 'IN_PROGRESS' CHECK(status IN ('IN_PROGRESS', 'LOCKED', 'SUBMITTED')),
-      violation_count INTEGER NOT NULL DEFAULT 0,
-      unlock_count INTEGER NOT NULL DEFAULT 0,
-      locked_reason TEXT NOT NULL DEFAULT '',
-      unlocked_by INTEGER REFERENCES users(id),
-      question_order_json TEXT NOT NULL DEFAULT '[]',
-      started_at TEXT NOT NULL DEFAULT (datetime('now')),
-      last_sync_at TEXT NOT NULL DEFAULT (datetime('now')),
-      submitted_at TEXT,
-      auto_score REAL NOT NULL DEFAULT 0,
-      manual_score_adjustment REAL NOT NULL DEFAULT 0,
-      final_score REAL NOT NULL DEFAULT 0,
-      grading_status TEXT NOT NULL DEFAULT 'AUTO' CHECK(grading_status IN ('AUTO', 'NEEDS_REVIEW', 'GRADED')),
-      UNIQUE(exam_id, student_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS student_answers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
-      exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
-      answer_json TEXT NOT NULL DEFAULT 'null',
-      auto_score REAL NOT NULL DEFAULT 0,
-      manual_score REAL,
-      teacher_note TEXT NOT NULL DEFAULT '',
-      is_manually_graded INTEGER NOT NULL DEFAULT 0,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      UNIQUE(session_id, question_id)
-    );
-
-    CREATE TABLE IF NOT EXISTS violation_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
-      exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-      student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      violation_type TEXT NOT NULL,
-      detail TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id, sort_order);
-    CREATE INDEX IF NOT EXISTS idx_sessions_exam ON exam_sessions(exam_id, status);
-    CREATE INDEX IF NOT EXISTS idx_answers_session ON student_answers(session_id);
-    CREATE INDEX IF NOT EXISTS idx_answers_exam ON student_answers(exam_id, question_id);
-    CREATE INDEX IF NOT EXISTS idx_violations_exam ON violation_logs(exam_id, created_at);
-  `);
-
-  // Safe migration for existing databases adding exam schedule columns
-  const examCols = db.prepare("PRAGMA table_info(exams)").all() as Array<{ name: string }>;
-  const examColNames = new Set(examCols.map((c) => c.name));
-  if (!examColNames.has('start_at')) {
-    db.exec("ALTER TABLE exams ADD COLUMN start_at TEXT NOT NULL DEFAULT ''");
-  }
-  if (!examColNames.has('end_at')) {
-    db.exec("ALTER TABLE exams ADD COLUMN end_at TEXT NOT NULL DEFAULT ''");
-  }
-
-  // Seed default login slides if empty
-  const slideCount = (db.prepare('SELECT COUNT(*) as c FROM login_slides').get() as { c: number }).c;
-  if (slideCount === 0) {
-    const insertSlide = db.prepare(`
-      INSERT INTO login_slides (title, subtitle, badge_label, image_url, sort_order, is_active)
-      VALUES (?, ?, ?, ?, ?, 1)
-    `);
-    insertSlide.run(
-      'Evaluasi Digital Terintegrasi & Berintegritas',
-      'Platform MKC CBT menghadirkan ujian berbasis layar penuh dengan pemantauan pengawas secara langsung dan sinkronisasi jawaban anti-putus koneksi.',
-      'Sistem Ujian MKC',
-      '/src/assets/images/slider_campus_digital_1795305217271.jpg',
-      1
-    );
-    insertSlide.run(
-      'Ringan untuk Ratusan Hingga 1.000 Peserta Serentak',
-      'Paket soal dikirim sekali ke peramban dengan cache lokal cerdas dan pengiriman jawaban berkelompok agar tetap stabil di jaringan sekolah.',
-      'Arsitektur Berkecepatan Tinggi',
-      '/src/assets/images/slider_exam_focus_1795305218316.jpg',
-      2
-    );
-    insertSlide.run(
-      'Analisis Butir Soal Psikometrik Lengkap',
-      'Evaluasi otomatis tingkat kesukaran, daya pembeda, validitas, efektivitas pengecoh, dan reliabilitas dengan ekspor Excel instan.',
-      'Analisis Mutu Akademik',
-      '/src/assets/images/slider_petal_motif_1795305217686.jpg',
-      3
-    );
-  }
-
-  // Default school identity & exam event settings
-  const insertDefaultSetting = db.prepare(`
-    INSERT OR IGNORE INTO system_settings (key, value, is_encrypted)
-    VALUES (?, ?, 0)
-  `);
-  insertDefaultSetting.run('school_name', 'SMK Teknologi MKC');
-  insertDefaultSetting.run('exam_event_title', 'Tes Akhir Semester');
-  insertDefaultSetting.run('academic_year', 'Tahun Pelajaran 2026/2027');
+export interface DbExecutor {
+  get<T = any>(sql: string, params?: any[]): Promise<T | undefined>;
+  all<T = any>(sql: string, params?: any[]): Promise<T[]>;
+  run(sql: string, params?: any[]): Promise<{ changes: number }>;
+  insertReturningId(sql: string, params?: any[]): Promise<number>;
+  exec(sql: string): Promise<void>;
 }
 
-export function seedInitialSimulationData(demoPassword: string) {
-  const tx = db.transaction(() => {
-    const existingGuru = db.prepare("SELECT id FROM users WHERE username = 'guru_rpl'").get();
+export interface UnifiedDb extends DbExecutor {
+  isPostgres: boolean;
+  transaction<T>(fn: (tx: DbExecutor) => Promise<T>): Promise<T>;
+}
+
+export function nowIso(): string {
+  return new Date().toISOString();
+}
+
+export function parseDbDateMs(val: unknown): number {
+  if (!val) return NaN;
+  if (val instanceof Date) return val.getTime();
+  const s = String(val).trim();
+  if (!s) return NaN;
+  // Already ISO with timezone or Z
+  if (s.includes('T') && (s.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(s))) {
+    return new Date(s).getTime();
+  }
+  // SQLite DATETIME('now') / CURRENT_TIMESTAMP format: "YYYY-MM-DD HH:MM:SS"
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(s)) {
+    return new Date(s.replace(' ', 'T') + 'Z').getTime();
+  }
+  return new Date(s).getTime();
+}
+
+// Convert '?' positional placeholders outside single-quoted literals to $1, $2, ... for PostgreSQL
+function toPgParams(sql: string): string {
+  let out = '';
+  let paramIndex = 1;
+  let inSingleQuote = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'") {
+      out += ch;
+      if (inSingleQuote && sql[i + 1] === "'") {
+        out += sql[i + 1];
+        i++;
+      } else {
+        inSingleQuote = !inSingleQuote;
+      }
+    } else if (ch === '?' && !inSingleQuote) {
+      out += `$${paramIndex++}`;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+let pgPool: pg.Pool | null = null;
+let sqliteInstance: any = null;
+let sqliteTxChain: Promise<unknown> = Promise.resolve();
+let initPromise: Promise<void> | null = null;
+
+function getPgPool(): pg.Pool {
+  if (!pgPool) {
+    const isLocal = CONNECTION_STRING.includes('localhost') || CONNECTION_STRING.includes('127.0.0.1');
+    pgPool = new Pool({
+      connectionString: CONNECTION_STRING,
+      max: isVercel ? 5 : 15,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 10000,
+      ssl: isLocal ? undefined : { rejectUnauthorized: false },
+    });
+  }
+  return pgPool;
+}
+
+async function getSqlite(): Promise<any> {
+  if (!sqliteInstance) {
+    ensureDirectories();
+    const { default: Database } = await import('better-sqlite3');
+    const dbPath = path.join(DATA_DIR, 'mkc_cbt.db');
+    sqliteInstance = new Database(dbPath);
+    sqliteInstance.pragma('journal_mode = WAL');
+    sqliteInstance.pragma('synchronous = NORMAL');
+    sqliteInstance.pragma('busy_timeout = 15000');
+    sqliteInstance.pragma('temp_store = MEMORY');
+    sqliteInstance.pragma('cache_size = -64000');
+    sqliteInstance.pragma('foreign_keys = ON');
+  }
+  return sqliteInstance;
+}
+
+function makePgExecutor(client: pg.Pool | pg.PoolClient): DbExecutor {
+  return {
+    async get<T = any>(sql: string, params: any[] = []): Promise<T | undefined> {
+      const res = await client.query(toPgParams(sql), params);
+      return res.rows[0] as T | undefined;
+    },
+    async all<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+      const res = await client.query(toPgParams(sql), params);
+      return res.rows as T[];
+    },
+    async run(sql: string, params: any[] = []): Promise<{ changes: number }> {
+      const res = await client.query(toPgParams(sql), params);
+      return { changes: res.rowCount ?? 0 };
+    },
+    async insertReturningId(sql: string, params: any[] = []): Promise<number> {
+      const trimmed = sql.trim().replace(/;+$/, '');
+      const hasReturning = /\bRETURNING\b/i.test(trimmed);
+      const finalSql = hasReturning ? trimmed : `${trimmed} RETURNING id`;
+      const res = await client.query(toPgParams(finalSql), params);
+      return Number(res.rows[0]?.id ?? 0);
+    },
+    async exec(sql: string): Promise<void> {
+      await client.query(sql);
+    },
+  };
+}
+
+function makeSqliteExecutor(sq: any): DbExecutor {
+  return {
+    async get<T = any>(sql: string, params: any[] = []): Promise<T | undefined> {
+      return sq.prepare(sql).get(...params) as T | undefined;
+    },
+    async all<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+      return sq.prepare(sql).all(...params) as T[];
+    },
+    async run(sql: string, params: any[] = []): Promise<{ changes: number }> {
+      const info = sq.prepare(sql).run(...params);
+      return { changes: info.changes ?? 0 };
+    },
+    async insertReturningId(sql: string, params: any[] = []): Promise<number> {
+      const info = sq.prepare(sql).run(...params);
+      return Number(info.lastInsertRowid ?? 0);
+    },
+    async exec(sql: string): Promise<void> {
+      sq.exec(sql);
+    },
+  };
+}
+
+export const db: UnifiedDb = {
+  isPostgres,
+  async get<T = any>(sql: string, params: any[] = []): Promise<T | undefined> {
+    if (isPostgres) return makePgExecutor(getPgPool()).get<T>(sql, params);
+    return makeSqliteExecutor(await getSqlite()).get<T>(sql, params);
+  },
+  async all<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+    if (isPostgres) return makePgExecutor(getPgPool()).all<T>(sql, params);
+    return makeSqliteExecutor(await getSqlite()).all<T>(sql, params);
+  },
+  async run(sql: string, params: any[] = []): Promise<{ changes: number }> {
+    if (isPostgres) return makePgExecutor(getPgPool()).run(sql, params);
+    return makeSqliteExecutor(await getSqlite()).run(sql, params);
+  },
+  async insertReturningId(sql: string, params: any[] = []): Promise<number> {
+    if (isPostgres) return makePgExecutor(getPgPool()).insertReturningId(sql, params);
+    return makeSqliteExecutor(await getSqlite()).insertReturningId(sql, params);
+  },
+  async exec(sql: string): Promise<void> {
+    if (isPostgres) return makePgExecutor(getPgPool()).exec(sql);
+    return makeSqliteExecutor(await getSqlite()).exec(sql);
+  },
+  async transaction<T>(fn: (tx: DbExecutor) => Promise<T>): Promise<T> {
+    if (isPostgres) {
+      const client = await getPgPool().connect();
+      const txExec = makePgExecutor(client);
+      try {
+        await client.query('BEGIN');
+        const result = await fn(txExec);
+        await client.query('COMMIT');
+        return result;
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    // Serialize SQLite transactions cleanly across async microtasks
+    const runTx = sqliteTxChain.then(async () => {
+      const sq = await getSqlite();
+      const txExec = makeSqliteExecutor(sq);
+      sq.exec('BEGIN IMMEDIATE');
+      try {
+        const result = await fn(txExec);
+        sq.exec('COMMIT');
+        return result;
+      } catch (err) {
+        try {
+          sq.exec('ROLLBACK');
+        } catch {
+          // ignore
+        }
+        throw err;
+      }
+    });
+    sqliteTxChain = runTx.then(() => undefined, () => undefined);
+    return runTx;
+  },
+};
+
+export async function initDatabase(): Promise<void> {
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    if (isPostgres) {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id SERIAL PRIMARY KEY,
+          username TEXT NOT NULL UNIQUE,
+          full_name TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('admin', 'guru', 'pengawas', 'siswa')),
+          class_name TEXT NOT NULL DEFAULT '',
+          password_hash TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));
+
+        CREATE TABLE IF NOT EXISTS login_slides (
+          id SERIAL PRIMARY KEY,
+          title TEXT NOT NULL,
+          subtitle TEXT NOT NULL,
+          badge_label TEXT NOT NULL DEFAULT 'MKC CBT',
+          image_url TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS system_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          is_encrypted INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+          bucket TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          data_base64 TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (bucket, filename)
+        );
+
+        CREATE TABLE IF NOT EXISTS question_banks (
+          id SERIAL PRIMARY KEY,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          grade_level TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT '',
+          updated_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS questions (
+          id SERIAL PRIMARY KEY,
+          bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          q_type TEXT NOT NULL CHECK(q_type IN ('PG', 'PGK', 'BS', 'JODOH', 'ISIAN', 'ESAI')),
+          prompt_text TEXT NOT NULL,
+          image_url TEXT NOT NULL DEFAULT '',
+          options_json TEXT NOT NULL DEFAULT '{}',
+          answer_key_json TEXT NOT NULL DEFAULT '{}',
+          max_score DOUBLE PRECISION NOT NULL DEFAULT 1,
+          difficulty_tag TEXT NOT NULL DEFAULT 'Sedang',
+          explanation TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS exams (
+          id SERIAL PRIMARY KEY,
+          bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          token_code TEXT NOT NULL,
+          duration_minutes INTEGER NOT NULL DEFAULT 60,
+          max_violations INTEGER NOT NULL DEFAULT 3,
+          shuffle_questions INTEGER NOT NULL DEFAULT 1,
+          shuffle_options INTEGER NOT NULL DEFAULT 0,
+          show_result_to_student INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'ACTIVE', 'CLOSED')),
+          target_classes TEXT NOT NULL DEFAULT 'ALL',
+          start_at TEXT NOT NULL DEFAULT '',
+          end_at TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS exam_sessions (
+          id SERIAL PRIMARY KEY,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'IN_PROGRESS' CHECK(status IN ('IN_PROGRESS', 'LOCKED', 'SUBMITTED')),
+          violation_count INTEGER NOT NULL DEFAULT 0,
+          unlock_count INTEGER NOT NULL DEFAULT 0,
+          locked_reason TEXT NOT NULL DEFAULT '',
+          unlocked_by INTEGER REFERENCES users(id),
+          question_order_json TEXT NOT NULL DEFAULT '[]',
+          started_at TEXT NOT NULL DEFAULT '',
+          last_sync_at TEXT NOT NULL DEFAULT '',
+          submitted_at TEXT,
+          auto_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+          manual_score_adjustment DOUBLE PRECISION NOT NULL DEFAULT 0,
+          final_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+          grading_status TEXT NOT NULL DEFAULT 'AUTO' CHECK(grading_status IN ('AUTO', 'NEEDS_REVIEW', 'GRADED')),
+          UNIQUE(exam_id, student_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS student_answers (
+          id SERIAL PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+          answer_json TEXT NOT NULL DEFAULT 'null',
+          auto_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+          manual_score DOUBLE PRECISION,
+          teacher_note TEXT NOT NULL DEFAULT '',
+          is_manually_graded INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT '',
+          UNIQUE(session_id, question_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS violation_logs (
+          id SERIAL PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          violation_type TEXT NOT NULL,
+          detail TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_sessions_exam ON exam_sessions(exam_id, status);
+        CREATE INDEX IF NOT EXISTS idx_answers_session ON student_answers(session_id);
+        CREATE INDEX IF NOT EXISTS idx_answers_exam ON student_answers(exam_id, question_id);
+        CREATE INDEX IF NOT EXISTS idx_violations_exam ON violation_logs(exam_id, created_at);
+      `);
+    } else {
+      await db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          full_name TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('admin', 'guru', 'pengawas', 'siswa')),
+          class_name TEXT NOT NULL DEFAULT '',
+          password_hash TEXT NOT NULL,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS login_slides (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          subtitle TEXT NOT NULL,
+          badge_label TEXT NOT NULL DEFAULT 'MKC CBT',
+          image_url TEXT NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          is_active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS system_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          is_encrypted INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS uploaded_files (
+          bucket TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          data_base64 TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          PRIMARY KEY (bucket, filename)
+        );
+
+        CREATE TABLE IF NOT EXISTS question_banks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          grade_level TEXT NOT NULL DEFAULT '',
+          description TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS questions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          q_type TEXT NOT NULL CHECK(q_type IN ('PG', 'PGK', 'BS', 'JODOH', 'ISIAN', 'ESAI')),
+          prompt_text TEXT NOT NULL,
+          image_url TEXT NOT NULL DEFAULT '',
+          options_json TEXT NOT NULL DEFAULT '{}',
+          answer_key_json TEXT NOT NULL DEFAULT '{}',
+          max_score REAL NOT NULL DEFAULT 1,
+          difficulty_tag TEXT NOT NULL DEFAULT 'Sedang',
+          explanation TEXT NOT NULL DEFAULT '',
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS exams (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          bank_id INTEGER NOT NULL REFERENCES question_banks(id) ON DELETE CASCADE,
+          owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          token_code TEXT NOT NULL,
+          duration_minutes INTEGER NOT NULL DEFAULT 60,
+          max_violations INTEGER NOT NULL DEFAULT 3,
+          shuffle_questions INTEGER NOT NULL DEFAULT 1,
+          shuffle_options INTEGER NOT NULL DEFAULT 0,
+          show_result_to_student INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'ACTIVE', 'CLOSED')),
+          target_classes TEXT NOT NULL DEFAULT 'ALL',
+          start_at TEXT NOT NULL DEFAULT '',
+          end_at TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS exam_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'IN_PROGRESS' CHECK(status IN ('IN_PROGRESS', 'LOCKED', 'SUBMITTED')),
+          violation_count INTEGER NOT NULL DEFAULT 0,
+          unlock_count INTEGER NOT NULL DEFAULT 0,
+          locked_reason TEXT NOT NULL DEFAULT '',
+          unlocked_by INTEGER REFERENCES users(id),
+          question_order_json TEXT NOT NULL DEFAULT '[]',
+          started_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_sync_at TEXT NOT NULL DEFAULT (datetime('now')),
+          submitted_at TEXT,
+          auto_score REAL NOT NULL DEFAULT 0,
+          manual_score_adjustment REAL NOT NULL DEFAULT 0,
+          final_score REAL NOT NULL DEFAULT 0,
+          grading_status TEXT NOT NULL DEFAULT 'AUTO' CHECK(grading_status IN ('AUTO', 'NEEDS_REVIEW', 'GRADED')),
+          UNIQUE(exam_id, student_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS student_answers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+          answer_json TEXT NOT NULL DEFAULT 'null',
+          auto_score REAL NOT NULL DEFAULT 0,
+          manual_score REAL,
+          teacher_note TEXT NOT NULL DEFAULT '',
+          is_manually_graded INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(session_id, question_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS violation_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL REFERENCES exam_sessions(id) ON DELETE CASCADE,
+          exam_id INTEGER NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+          student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          violation_type TEXT NOT NULL,
+          detail TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_questions_bank ON questions(bank_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_sessions_exam ON exam_sessions(exam_id, status);
+        CREATE INDEX IF NOT EXISTS idx_answers_session ON student_answers(session_id);
+        CREATE INDEX IF NOT EXISTS idx_answers_exam ON student_answers(exam_id, question_id);
+        CREATE INDEX IF NOT EXISTS idx_violations_exam ON violation_logs(exam_id, created_at);
+      `);
+
+      // Safe migration for existing SQLite databases adding exam schedule columns
+      const examCols = await db.all<{ name: string }>('PRAGMA table_info(exams)');
+      const examColNames = new Set(examCols.map((c) => c.name));
+      if (!examColNames.has('start_at')) {
+        await db.exec("ALTER TABLE exams ADD COLUMN start_at TEXT NOT NULL DEFAULT ''");
+      }
+      if (!examColNames.has('end_at')) {
+        await db.exec("ALTER TABLE exams ADD COLUMN end_at TEXT NOT NULL DEFAULT ''");
+      }
+    }
+
+    // Seed default login slides if empty
+    const slideRow = await db.get<{ c: number }>('SELECT COUNT(*) as c FROM login_slides');
+    if ((slideRow?.c ?? 0) === 0) {
+      const now = nowIso();
+      const insertSlideSql = `
+        INSERT INTO login_slides (title, subtitle, badge_label, image_url, sort_order, is_active, created_at)
+        VALUES (?, ?, ?, ?, ?, 1, ?)
+      `;
+      await db.run(insertSlideSql, [
+        'Evaluasi Digital Terintegrasi & Berintegritas',
+        'Platform MKC CBT menghadirkan ujian berbasis layar penuh dengan pemantauan pengawas secara langsung dan sinkronisasi jawaban anti-putus koneksi.',
+        'Sistem Ujian MKC',
+        '/assets/images/slider_campus_digital_1795305217271.jpg',
+        1,
+        now,
+      ]);
+      await db.run(insertSlideSql, [
+        'Ringan untuk Ratusan Hingga 1.000 Peserta Serentak',
+        'Paket soal dikirim sekali ke peramban dengan cache lokal cerdas dan pengiriman jawaban berkelompok agar tetap stabil di jaringan sekolah.',
+        'Arsitektur Berkecepatan Tinggi',
+        '/assets/images/slider_exam_focus_1795305218316.jpg',
+        2,
+        now,
+      ]);
+      await db.run(insertSlideSql, [
+        'Analisis Butir Soal Psikometrik Lengkap',
+        'Evaluasi otomatis tingkat kesukaran, daya pembeda, validitas, efektivitas pengecoh, dan reliabilitas dengan ekspor Excel instan.',
+        'Analisis Mutu Akademik',
+        '/assets/images/slider_petal_motif_1795305217686.jpg',
+        3,
+        now,
+      ]);
+    } else {
+      await db.run(
+        `UPDATE login_slides SET image_url = REPLACE(image_url, '/src/assets/images/', '/assets/images/') WHERE image_url LIKE '/src/assets/images/%'`
+      );
+    }
+
+    // Default school identity & exam event settings
+    const now = nowIso();
+    const insertDefaultSettingSql = `
+      INSERT INTO system_settings (key, value, is_encrypted, updated_at)
+      VALUES (?, ?, 0, ?)
+      ON CONFLICT(key) DO NOTHING
+    `;
+    await db.run(insertDefaultSettingSql, ['school_name', 'SMK Teknologi MKC', now]);
+    await db.run(insertDefaultSettingSql, ['exam_event_title', 'Tes Akhir Semester', now]);
+    await db.run(insertDefaultSettingSql, ['academic_year', 'Tahun Pelajaran 2026/2027', now]);
+  })().catch((err) => {
+    initPromise = null;
+    throw err;
+  });
+
+  return initPromise;
+}
+
+export async function saveUploadedFile(
+  bucket: 'questions' | 'slides',
+  filename: string,
+  mimeType: string,
+  buffer: Buffer
+): Promise<string> {
+  const b64 = buffer.toString('base64');
+  const now = nowIso();
+  await db.run(
+    `
+    INSERT INTO uploaded_files (bucket, filename, mime_type, data_base64, created_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(bucket, filename) DO UPDATE SET
+      mime_type = excluded.mime_type,
+      data_base64 = excluded.data_base64,
+      created_at = excluded.created_at
+  `,
+    [bucket, filename, mimeType, b64, now]
+  );
+
+  // Also mirror to local disk in local SQLite mode if writable
+  if (!isVercel && !isPostgres) {
+    try {
+      ensureDirectories();
+      const targetDir = bucket === 'questions' ? QUESTION_UPLOADS_DIR : SLIDER_UPLOADS_DIR;
+      const dest = path.resolve(targetDir, filename);
+      if (dest.startsWith(path.resolve(targetDir) + path.sep)) {
+        fs.writeFileSync(dest, buffer);
+      }
+    } catch {
+      // Safe fallback: file is already persisted in DB
+    }
+  }
+
+  return `/uploads/${bucket}/${filename}`;
+}
+
+export async function getUploadedFile(
+  bucket: 'questions' | 'slides',
+  filename: string
+): Promise<{ mimeType: string; buffer: Buffer } | null> {
+  const row = await db.get<{ mime_type: string; data_base64: string }>(
+    'SELECT mime_type, data_base64 FROM uploaded_files WHERE bucket = ? AND filename = ?',
+    [bucket, filename]
+  );
+  if (row) {
+    return {
+      mimeType: row.mime_type,
+      buffer: Buffer.from(row.data_base64, 'base64'),
+    };
+  }
+  return null;
+}
+
+export async function seedInitialSimulationData(demoPassword: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const existingGuru = await tx.get("SELECT id FROM users WHERE LOWER(username) = LOWER('guru_rpl')");
     if (existingGuru) return;
 
+    const now = nowIso();
     const passHash = hashPassword(demoPassword);
-    const insertUser = db.prepare(`
-      INSERT INTO users (username, full_name, role, class_name, password_hash, is_active)
-      VALUES (?, ?, ?, ?, ?, 1)
-    `);
+    const insertUserSql = `
+      INSERT INTO users (username, full_name, role, class_name, password_hash, is_active, created_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?)
+    `;
 
-    const guru1Id = Number(insertUser.run('guru_rpl', 'Budi Santoso, S.Kom.', 'guru', 'Pengampu Informatika', passHash).lastInsertRowid);
-    const guru2Id = Number(insertUser.run('guru_mtk', 'Siti Rahmawati, M.Pd.', 'guru', 'Pengampu Matematika', passHash).lastInsertRowid);
-    insertUser.run('pengawas1', 'Agus Wijaya, S.Pd.', 'pengawas', 'Tim Pengawas Ruang 1', passHash);
+    const guru1Id = await tx.insertReturningId(insertUserSql, [
+      'guru_rpl',
+      'Budi Santoso, S.Kom.',
+      'guru',
+      'Pengampu Informatika',
+      passHash,
+      now,
+    ]);
+    const guru2Id = await tx.insertReturningId(insertUserSql, [
+      'guru_mtk',
+      'Siti Rahmawati, M.Pd.',
+      'guru',
+      'Pengampu Matematika',
+      passHash,
+      now,
+    ]);
+    await tx.insertReturningId(insertUserSql, [
+      'pengawas1',
+      'Agus Wijaya, S.Pd.',
+      'pengawas',
+      'Tim Pengawas Ruang 1',
+      passHash,
+      now,
+    ]);
 
     const studentIds: number[] = [];
     const sampleNames = [
-      'Ahmad Fauzi', 'Putri Lestari', 'Rizky Pratama', 'Nadia Salsabila', 'Dimas Saputra',
-      'Aulia Rahman', 'Citra Dewi', 'Bagas Kurniawan', 'Intan Permata', 'Fajar Nugroho',
-      'Salsa Amelia', 'Rendi Hidayat', 'Melati Kusuma', 'Yoga Mahendra', 'Tari Oktaviani',
+      'Ahmad Fauzi',
+      'Putri Lestari',
+      'Rizky Pratama',
+      'Nadia Salsabila',
+      'Dimas Saputra',
+      'Aulia Rahman',
+      'Citra Dewi',
+      'Bagas Kurniawan',
+      'Intan Permata',
+      'Fajar Nugroho',
+      'Salsa Amelia',
+      'Rendi Hidayat',
+      'Melati Kusuma',
+      'Yoga Mahendra',
+      'Tari Oktaviani',
     ];
     for (let i = 0; i < sampleNames.length; i++) {
       const uname = `siswa${String(i + 1).padStart(2, '0')}`;
       const cls = i < 8 ? 'XII TKJ 1' : 'XII RPL 1';
-      const sid = Number(insertUser.run(uname, sampleNames[i], 'siswa', cls, passHash).lastInsertRowid);
+      const sid = await tx.insertReturningId(insertUserSql, [uname, sampleNames[i], 'siswa', cls, passHash, now]);
       studentIds.push(sid);
     }
 
-    // Guru 1 Bank Soal (with all 6 question types)
-    const bank1Id = Number(
-      db.prepare(`
-        INSERT INTO question_banks (owner_id, title, subject, grade_level, description)
-        VALUES (?, 'Sumatif Akhir Semester Jaringan & Sistem Digital', 'Informatika & TKJ', 'XII', 'Paket evaluasi lengkap 6 tipe soal standar MKC CBT.')
-      `).run(guru1Id).lastInsertRowid
+    const bank1Id = await tx.insertReturningId(
+      `
+      INSERT INTO question_banks (owner_id, title, subject, grade_level, description, created_at, updated_at)
+      VALUES (?, 'Sumatif Akhir Semester Jaringan & Sistem Digital', 'Informatika & TKJ', 'XII', 'Paket evaluasi lengkap 6 tipe soal standar MKC CBT.', ?, ?)
+    `,
+      [guru1Id, now, now]
     );
 
-    const insertQ = db.prepare(`
-      INSERT INTO questions (bank_id, owner_id, q_type, prompt_text, image_url, options_json, answer_key_json, max_score, difficulty_tag, explanation, sort_order)
-      VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
-    `);
+    const insertQSql = `
+      INSERT INTO questions (bank_id, owner_id, q_type, prompt_text, image_url, options_json, answer_key_json, max_score, difficulty_tag, explanation, sort_order, created_at)
+      VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+    `;
 
-    const q1Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'PG',
+    const q1Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'PG',
       'Protokol lapisan transport yang menjamin pengiriman paket data secara andal dengan mekanisme handshake dan acknowledgment adalah...',
       JSON.stringify([
         { id: 'A', text: 'UDP (User Datagram Protocol)' },
@@ -259,11 +721,17 @@ export function seedInitialSimulationData(demoPassword: string) {
         { id: 'E', text: 'DHCP (Dynamic Host Configuration Protocol)' },
       ]),
       JSON.stringify({ correct: 'B' }),
-      10, 'Mudah', 'TCP bersifat connection-oriented dan menjamin integritas pengiriman data.', 1
-    ).lastInsertRowid);
+      10,
+      'Mudah',
+      'TCP bersifat connection-oriented dan menjamin integritas pengiriman data.',
+      1,
+      now,
+    ]);
 
-    const q2Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'PG',
+    const q2Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'PG',
       'Jika sebuah jaringan lokal menggunakan subnet mask 255.255.255.224 (/27), berapakah jumlah host yang dapat digunakan secara valid pada satu subnet?',
       JSON.stringify([
         { id: 'A', text: '14 host' },
@@ -273,11 +741,17 @@ export function seedInitialSimulationData(demoPassword: string) {
         { id: 'E', text: '254 host' },
       ]),
       JSON.stringify({ correct: 'B' }),
-      10, 'Sedang', 'Prefix /27 menyisakan 5 bit host: (2^5) - 2 = 30 alamat host valid.', 2
-    ).lastInsertRowid);
+      10,
+      'Sedang',
+      'Prefix /27 menyisakan 5 bit host: (2^5) - 2 = 30 alamat host valid.',
+      2,
+      now,
+    ]);
 
-    const q3Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'PGK',
+    const q3Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'PGK',
       'Manakah di antara pernyataan berikut yang termasuk prinsip keamanan informasi dalam triad CIA dan praktik pengamanan server? (Pilih lebih dari satu jawaban benar)',
       JSON.stringify([
         { id: 'A', text: 'Confidentiality — menjaga kerahasiaan data dengan enkripsi' },
@@ -286,11 +760,17 @@ export function seedInitialSimulationData(demoPassword: string) {
         { id: 'D', text: 'Menyimpan kata sandi dalam bentuk teks biasa agar mudah dibaca' },
       ]),
       JSON.stringify({ correct: ['A', 'B', 'C'], partialCredit: true }),
-      15, 'Sedang', 'Triad CIA terdiri dari Confidentiality, Integrity, dan Availability.', 3
-    ).lastInsertRowid);
+      15,
+      'Sedang',
+      'Triad CIA terdiri dari Confidentiality, Integrity, dan Availability.',
+      3,
+      now,
+    ]);
 
-    const q4Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'BS',
+    const q4Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'BS',
       'Tentukan nilai kebenaran dari setiap pernyataan mengenai arsitektur HTTP dan caching peramban berikut:',
       JSON.stringify([
         { id: '1', statement: 'HTTPS menggunakan enkripsi TLS untuk melindungi komunikasi antara klien dan server.' },
@@ -298,11 +778,17 @@ export function seedInitialSimulationData(demoPassword: string) {
         { id: '3', statement: 'Penyimpanan lokal di peramban memungkinkan aplikasi ujian menyimpan jawaban sementara saat koneksi terputus.' },
       ]),
       JSON.stringify({ correct: { '1': 'B', '2': 'S', '3': 'B' } }),
-      15, 'Sedang', 'HTTPS mengenkripsi transport dengan TLS, sedangkan kata sandi tidak boleh dikirim via query URL GET.', 4
-    ).lastInsertRowid);
+      15,
+      'Sedang',
+      'HTTPS mengenkripsi transport dengan TLS, sedangkan kata sandi tidak boleh dikirim via query URL GET.',
+      4,
+      now,
+    ]);
 
-    const q5Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'JODOH',
+    const q5Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'JODOH',
       'Pasangkan port standar layanan jaringan di sebelah kiri dengan nama protokol yang sesuai di sebelah kanan:',
       JSON.stringify({
         left: [
@@ -317,35 +803,54 @@ export function seedInitialSimulationData(demoPassword: string) {
         ],
       }),
       JSON.stringify({ pairs: { L1: 'R2', L2: 'R3', L3: 'R1' } }),
-      15, 'Sedang', 'SSH menggunakan port 22, HTTP port 80, dan HTTPS port 443.', 5
-    ).lastInsertRowid);
+      15,
+      'Sedang',
+      'SSH menggunakan port 22, HTTP port 80, dan HTTPS port 443.',
+      5,
+      now,
+    ]);
 
-    const q6Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'ISIAN',
+    const q6Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'ISIAN',
       'Apa kepanjangan singkatan dari DNS dalam sistem penamaan domain internet? (Tulis dalam bahasa Inggris)',
       JSON.stringify({ caseSensitive: false }),
       JSON.stringify({ accepted: ['domain name system', 'domain name server'] }),
-      10, 'Mudah', 'DNS adalah singkatan dari Domain Name System.', 6
-    ).lastInsertRowid);
+      10,
+      'Mudah',
+      'DNS adalah singkatan dari Domain Name System.',
+      6,
+      now,
+    ]);
 
-    const q7Id = Number(insertQ.run(
-      bank1Id, guru1Id, 'ESAI',
+    const q7Id = await tx.insertReturningId(insertQSql, [
+      bank1Id,
+      guru1Id,
+      'ESAI',
       'Jelaskan langkah-langkah mitigasi yang harus dilakukan administrator sekolah ketika terjadi lonjakan koneksi bersamaan dari ratusan peserta ujian CBT!',
       JSON.stringify({ rubric: 'Sebutkan caching soal, pengiriman jawaban bertahap (batch), mode WAL/pooling database, dan cadangan offline lokal.' }),
       JSON.stringify({ referenceAnswer: 'Mengirim paket soal sekali dan memanfaatkan cache browser, melakukan batching pengiriman jawaban, mengoptimalkan koneksi/WAL database, serta menyediakan penyimpanan offline otomatis.' }),
-      25, 'Sukar', 'Penilaian esai mengacu pada kelengkapan aspek caching, batching, dan reliabilitas database.', 7
-    ).lastInsertRowid);
+      25,
+      'Sukar',
+      'Penilaian esai mengacu pada kelengkapan aspek caching, batching, dan reliabilitas database.',
+      7,
+      now,
+    ]);
 
-    // Guru 2 Isolated Bank Soal (proves Guru 1 cannot view/open Guru 2's bank!)
-    const bank2Id = Number(
-      db.prepare(`
-        INSERT INTO question_banks (owner_id, title, subject, grade_level, description)
-        VALUES (?, 'Bank Soal Matematika Terapan — Khusus Guru Matematika', 'Matematika', 'XII', 'Bank soal privat milik Ibu Siti Rahmawati (terisolasi dari guru lain).')
-      `).run(guru2Id).lastInsertRowid
+    // Guru 2 Isolated Bank Soal
+    const bank2Id = await tx.insertReturningId(
+      `
+      INSERT INTO question_banks (owner_id, title, subject, grade_level, description, created_at, updated_at)
+      VALUES (?, 'Bank Soal Matematika Terapan — Khusus Guru Matematika', 'Matematika', 'XII', 'Bank soal privat milik Ibu Siti Rahmawati (terisolasi dari guru lain).', ?, ?)
+    `,
+      [guru2Id, now, now]
     );
-    insertQ.run(
-      bank2Id, guru2Id, 'PG',
-      'Jika fungsi f(x) = 3x^2 - 4x + 2, berapakah nilai turunan pertama f\'(2)?',
+    await tx.insertReturningId(insertQSql, [
+      bank2Id,
+      guru2Id,
+      'PG',
+      "Jika fungsi f(x) = 3x^2 - 4x + 2, berapakah nilai turunan pertama f'(2)?",
       JSON.stringify([
         { id: 'A', text: '4' },
         { id: 'B', text: '8' },
@@ -354,34 +859,37 @@ export function seedInitialSimulationData(demoPassword: string) {
         { id: 'E', text: '16' },
       ]),
       JSON.stringify({ correct: 'B' }),
-      10, 'Sedang', 'f\'(x) = 6x - 4, maka f\'(2) = 12 - 4 = 8.', 1
+      10,
+      'Sedang',
+      "f'(x) = 6x - 4, maka f'(2) = 12 - 4 = 8.",
+      1,
+      now,
+    ]);
+
+    const exam1Id = await tx.insertReturningId(
+      `
+      INSERT INTO exams (bank_id, owner_id, title, token_code, duration_minutes, max_violations, shuffle_questions, shuffle_options, show_result_to_student, status, target_classes, created_at)
+      VALUES (?, ?, 'Ujian Sumatif Informatika XII (Demo Lengkap)', 'MKC2026', 90, 3, 1, 0, 1, 'ACTIVE', 'ALL', ?)
+    `,
+      [bank1Id, guru1Id, now]
     );
 
-    // Create 1 Active Exam for Guru 1
-    const exam1Id = Number(
-      db.prepare(`
-        INSERT INTO exams (bank_id, owner_id, title, token_code, duration_minutes, max_violations, shuffle_questions, shuffle_options, show_result_to_student, status, target_classes)
-        VALUES (?, ?, 'Ujian Sumatif Informatika XII (Demo Lengkap)', 'MKC2026', 90, 3, 1, 0, 1, 'ACTIVE', 'ALL')
-      `).run(bank1Id, guru1Id).lastInsertRowid
-    );
-
-    // Populate 12 realistic completed student submissions so Item Analysis & Manual Grading work immediately!
-    // Leave siswa13, siswa14, siswa15 ready to take the exam fresh!
-    const insertSession = db.prepare(`
-      INSERT INTO exam_sessions (exam_id, student_id, status, violation_count, question_order_json, started_at, submitted_at, auto_score, manual_score_adjustment, final_score, grading_status)
-      VALUES (?, ?, 'SUBMITTED', ?, ?, datetime('now', '-45 minutes'), datetime('now', '-5 minutes'), ?, 0, ?, ?)
-    `);
-    const insertAns = db.prepare(`
-      INSERT INTO student_answers (session_id, exam_id, student_id, question_id, answer_json, auto_score, manual_score, is_manually_graded)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    const insertSessionSql = `
+      INSERT INTO exam_sessions (exam_id, student_id, status, violation_count, question_order_json, started_at, last_sync_at, submitted_at, auto_score, manual_score_adjustment, final_score, grading_status)
+      VALUES (?, ?, 'SUBMITTED', ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    `;
+    const insertAnsSql = `
+      INSERT INTO student_answers (session_id, exam_id, student_id, question_id, answer_json, auto_score, manual_score, is_manually_graded, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
 
     const qOrder = JSON.stringify([q1Id, q2Id, q3Id, q4Id, q5Id, q6Id, q7Id]);
     const totalMax = 100;
+    const startedDemo = new Date(Date.now() - 45 * 60 * 1000).toISOString();
+    const submittedDemo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
     for (let i = 0; i < 12; i++) {
       const sid = studentIds[i];
-      // Ability gradient from high (i=0..3) to medium (i=4..7) to low (i=8..11) for authentic discrimination statistics!
       const tier = i < 4 ? 'high' : i < 8 ? 'mid' : 'low';
       const ans1 = tier === 'high' ? 'B' : tier === 'mid' ? (i % 2 === 0 ? 'B' : 'A') : (i % 3 === 0 ? 'B' : i % 2 === 0 ? 'C' : 'A');
       const s1 = ans1 === 'B' ? 10 : 0;
@@ -410,7 +918,7 @@ export function seedInitialSimulationData(demoPassword: string) {
       const s6 = ans6.toLowerCase() === 'domain name system' ? 10 : 0;
 
       const ans7 = tier === 'high'
-        ? 'Mengirim soal sekali dengan cache peramban, mengirim jawaban secara berkelompok (batch), mengaktifkan SQLite WAL, dan menyediakan antrean offline.'
+        ? 'Mengirim soal sekali dengan cache peramban, mengirim jawaban secara berkelompok (batch), mengaktifkan SQLite WAL / pool Neon, dan menyediakan antrean offline.'
         : tier === 'mid'
           ? 'Memakai cache di browser dan menyimpan jawaban jika internet putus.'
           : 'Memperbesar bandwidth wifi ruang lab.';
@@ -420,21 +928,28 @@ export function seedInitialSimulationData(demoPassword: string) {
       const finalPct = Number(((earnedSum / totalMax) * 100).toFixed(2));
       const gradingStatus = isGraded ? 'GRADED' : 'NEEDS_REVIEW';
 
-      const sessId = Number(
-        insertSession.run(exam1Id, sid, i === 10 ? 1 : 0, qOrder, finalPct, finalPct, gradingStatus).lastInsertRowid
-      );
+      const sessId = await tx.insertReturningId(insertSessionSql, [
+        exam1Id,
+        sid,
+        i === 10 ? 1 : 0,
+        qOrder,
+        startedDemo,
+        submittedDemo,
+        submittedDemo,
+        finalPct,
+        finalPct,
+        gradingStatus,
+      ]);
 
-      insertAns.run(sessId, exam1Id, sid, q1Id, JSON.stringify(ans1), s1, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q2Id, JSON.stringify(ans2), s2, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q3Id, JSON.stringify(ans3), s3, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q4Id, JSON.stringify(ans4), s4, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q5Id, JSON.stringify(ans5), s5, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q6Id, JSON.stringify(ans6), s6, null, 0);
-      insertAns.run(sessId, exam1Id, sid, q7Id, JSON.stringify(ans7), 0, manualEsai, isGraded);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q1Id, JSON.stringify(ans1), s1, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q2Id, JSON.stringify(ans2), s2, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q3Id, JSON.stringify(ans3), s3, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q4Id, JSON.stringify(ans4), s4, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q5Id, JSON.stringify(ans5), s5, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q6Id, JSON.stringify(ans6), s6, null, 0, submittedDemo]);
+      await tx.run(insertAnsSql, [sessId, exam1Id, sid, q7Id, JSON.stringify(ans7), 0, manualEsai, isGraded, submittedDemo]);
     }
   });
-
-  tx();
 }
 
 export function getUplDirs() {

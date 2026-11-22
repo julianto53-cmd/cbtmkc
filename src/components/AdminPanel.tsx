@@ -33,7 +33,7 @@ export function AdminPanel({ user }: AdminPanelProps) {
     title: '',
     subtitle: '',
     badge_label: 'MKC CBT',
-    image_url: '/src/assets/images/slider_campus_digital_1795305217271.jpg',
+    image_url: '/assets/images/slider_campus_digital_1795305217271.jpg',
     sort_order: 1,
     is_active: true,
   });
@@ -140,7 +140,7 @@ export function AdminPanel({ user }: AdminPanelProps) {
         title: '',
         subtitle: '',
         badge_label: 'MKC CBT',
-        image_url: '/src/assets/images/slider_campus_digital_1795305217271.jpg',
+        image_url: '/assets/images/slider_campus_digital_1795305217271.jpg',
         sort_order: slides.length + 1,
         is_active: true,
       });
@@ -442,7 +442,7 @@ export function AdminPanel({ user }: AdminPanelProps) {
                       title: '',
                       subtitle: '',
                       badge_label: 'MKC CBT',
-                      image_url: '/src/assets/images/slider_campus_digital_1795305217271.jpg',
+                      image_url: '/assets/images/slider_campus_digital_1795305217271.jpg',
                       sort_order: slides.length + 1,
                       is_active: true,
                     })
@@ -765,36 +765,39 @@ export function AdminPanel({ user }: AdminPanelProps) {
       {tab === 'hosting' && (
         <div className="max-w-3xl rounded-xl border border-slate-200 bg-white p-6 space-y-5 text-sm text-slate-700 leading-relaxed">
           <div>
-            <h2 className="font-display font-bold text-lg text-slate-900">Panduan Upload MKC CBT ke Hosting</h2>
+            <h2 className="font-display font-bold text-lg text-slate-900">Panduan Deploy MKC CBT (Vercel + Neon &amp; Hosting Mandiri)</h2>
             <p className="text-xs text-slate-600 mt-1">
-              Aplikasi ini dirancang mandiri (standalone Node.js + SQLite WAL) tanpa ketergantungan layanan eksternal agar langsung siap diunggah ke VPS, Cloud Server, maupun cPanel Node.js Selector.
+              Aplikasi mendukung penuh deployment serverless di <strong>Vercel (vercel.com)</strong> dengan database <strong>Neon PostgreSQL (neon.tech)</strong>, maupun hosting mandiri (VPS/cPanel) dengan SQLite WAL Mode.
             </p>
           </div>
 
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-2.5">
+            <div className="font-semibold text-emerald-950">Opsi 1: Deploy ke Vercel + Neon PostgreSQL</div>
+            <ol className="list-decimal pl-5 text-xs space-y-1.5 text-slate-700">
+              <li>Buat database di <span className="font-mono font-semibold">neon.tech</span>, lalu salin connection string <strong>Pooled</strong> (<span className="font-mono">-pooler</span>).</li>
+              <li>Import repositori ke <span className="font-mono font-semibold">vercel.com</span> (konfigurasi <span className="font-mono">vercel.json</span> dan <span className="font-mono">api/index.ts</span> sudah tersedia).</li>
+              <li>Tambahkan Environment Variables di dashboard Vercel: <span className="font-mono font-semibold">DATABASE_URL</span>, <span className="font-mono font-semibold">SESSION_SECRET</span>, dan <span className="font-mono font-semibold">API_KEY_ENC_SECRET</span>.</li>
+              <li>Semua tabel dan gambar upload (logo, soal, slider, import Word) otomatis tersimpan aman di PostgreSQL Neon.</li>
+            </ol>
+          </div>
+
           <div className="space-y-2">
-            <div className="font-semibold text-slate-900">1. Langkah Build untuk Hosting</div>
+            <div className="font-semibold text-slate-900">Opsi 2: Build untuk VPS / cPanel (SQLite WAL atau Neon)</div>
             <pre className="p-3.5 rounded-lg bg-slate-900 text-emerald-200 font-mono text-xs overflow-x-auto">
 {`npm install
 npm run build:all
 npm run start:hosting`}
             </pre>
-          </div>
-
-          <div className="space-y-2">
-            <div className="font-semibold text-slate-900">2. Berkas & Folder yang Diunggah ke Server Hosting</div>
-            <ul className="list-disc pl-5 text-xs space-y-1">
-              <li><span className="font-mono font-semibold">dist/</span> — aset frontend hasil build Vite</li>
-              <li><span className="font-mono font-semibold">dist-server/server.mjs</span> — bundel backend Express siap produksi</li>
-              <li><span className="font-mono font-semibold">package.json</span> &amp; <span className="font-mono font-semibold">node_modules/</span> (atau jalankan <span className="font-mono">npm install --omit=dev</span> di hosting)</li>
-              <li>Folder <span className="font-mono font-semibold">data/</span> (berisi database <span className="font-mono">mkc_cbt.db</span>) dan <span className="font-mono font-semibold">uploads/</span> dibuat otomatis dan bersifat persisten.</li>
+            <ul className="list-disc pl-5 text-xs space-y-1 text-slate-600">
+              <li>Unggah <span className="font-mono font-semibold">dist/</span>, <span className="font-mono font-semibold">dist-server/server.mjs</span>, dan <span className="font-mono font-semibold">package.json</span>.</li>
+              <li>Jika <span className="font-mono">DATABASE_URL</span> kosong, aplikasi otomatis memakai SQLite lokal (<span className="font-mono">data/mkc_cbt.db</span>) dan folder <span className="font-mono">uploads/</span>.</li>
             </ul>
           </div>
 
           <div className="space-y-2">
-            <div className="font-semibold text-slate-900">3. Variabel Lingkungan (.env) di Hosting</div>
+            <div className="font-semibold text-slate-900">Contoh Variabel Lingkungan (Vercel / .env)</div>
             <pre className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs overflow-x-auto text-slate-800">
-{`NODE_ENV=production
-PORT=3000
+{`DATABASE_URL=postgresql://user:password@ep-xxxx-pooler.aws.neon.tech/neondb?sslmode=require
 SESSION_SECRET=isi_string_acak_panjang_32_karakter
 API_KEY_ENC_SECRET=isi_kunci_enkripsi_aes_256_anda
 ADMIN_PASSCODE=opsional_passcode_admin_utama`}

@@ -112,22 +112,20 @@ function variance(arr: number[]): number {
   return arr.reduce((acc, v) => acc + (v - mean) ** 2, 0) / arr.length;
 }
 
-export function computeExamItemAnalysis(examId: number): ExamAnalysisReport | null {
-  const exam = db.prepare(`
+export async function computeExamItemAnalysis(examId: number): Promise<ExamAnalysisReport | null> {
+  const exam = await db.get<{ id: number; title: string; bank_id: number; bank_title: string }>(
+    `
     SELECT e.id, e.title, e.bank_id, qb.title as bank_title
     FROM exams e
     JOIN question_banks qb ON qb.id = e.bank_id
     WHERE e.id = ?
-  `).get(examId) as { id: number; title: string; bank_id: number; bank_title: string } | undefined;
+  `,
+    [examId]
+  );
 
   if (!exam) return null;
 
-  const questions = db.prepare(`
-    SELECT id, q_type, prompt_text, options_json, answer_key_json, max_score, sort_order
-    FROM questions
-    WHERE bank_id = ?
-    ORDER BY sort_order ASC, id ASC
-  `).all(exam.bank_id) as Array<{
+  const questions = await db.all<{
     id: number;
     q_type: QuestionType;
     prompt_text: string;
@@ -135,17 +133,17 @@ export function computeExamItemAnalysis(examId: number): ExamAnalysisReport | nu
     answer_key_json: string;
     max_score: number;
     sort_order: number;
-  }>;
+  }>(
+    `
+    SELECT id, q_type, prompt_text, options_json, answer_key_json, max_score, sort_order
+    FROM questions
+    WHERE bank_id = ?
+    ORDER BY sort_order ASC, id ASC
+  `,
+    [exam.bank_id]
+  );
 
-  const sessions = db.prepare(`
-    SELECT es.id as session_id, es.student_id, es.auto_score, es.manual_score_adjustment, es.final_score,
-           es.violation_count, es.grading_status, es.submitted_at,
-           u.username, u.full_name, u.class_name
-    FROM exam_sessions es
-    JOIN users u ON u.id = es.student_id
-    WHERE es.exam_id = ? AND es.status = 'SUBMITTED'
-    ORDER BY es.final_score DESC
-  `).all(examId) as Array<{
+  const sessions = await db.all<{
     session_id: number;
     student_id: number;
     auto_score: number;
@@ -157,20 +155,34 @@ export function computeExamItemAnalysis(examId: number): ExamAnalysisReport | nu
     username: string;
     full_name: string;
     class_name: string;
-  }>;
+  }>(
+    `
+    SELECT es.id as session_id, es.student_id, es.auto_score, es.manual_score_adjustment, es.final_score,
+           es.violation_count, es.grading_status, es.submitted_at,
+           u.username, u.full_name, u.class_name
+    FROM exam_sessions es
+    JOIN users u ON u.id = es.student_id
+    WHERE es.exam_id = ? AND es.status = 'SUBMITTED'
+    ORDER BY es.final_score DESC
+  `,
+    [examId]
+  );
 
-  const allAnswers = db.prepare(`
-    SELECT session_id, question_id, answer_json, auto_score, manual_score, is_manually_graded
-    FROM student_answers
-    WHERE exam_id = ?
-  `).all(examId) as Array<{
+  const allAnswers = await db.all<{
     session_id: number;
     question_id: number;
     answer_json: string;
     auto_score: number;
     manual_score: number | null;
     is_manually_graded: number;
-  }>;
+  }>(
+    `
+    SELECT session_id, question_id, answer_json, auto_score, manual_score, is_manually_graded
+    FROM student_answers
+    WHERE exam_id = ?
+  `,
+    [examId]
+  );
 
   const answerMap = new Map<string, { raw: unknown; earned: number }>();
   for (const ans of allAnswers) {
@@ -586,42 +598,54 @@ export function buildItemAnalysisExcel(report: ExamAnalysisReport): Buffer {
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 }
 
-export function buildExamGradingExcel(examId: number): Buffer | null {
-  const exam = db.prepare(`
+export async function buildExamGradingExcel(examId: number): Promise<Buffer | null> {
+  const exam = await db.get<any>(
+    `
     SELECT e.*, qb.title as bank_title, qb.subject
     FROM exams e
     JOIN question_banks qb ON qb.id = e.bank_id
     WHERE e.id = ?
-  `).get(examId) as any;
+  `,
+    [examId]
+  );
 
   if (!exam) return null;
 
-  const questions = db.prepare(`
+  const questions = await db.all<{ id: number; q_type: string; max_score: number; sort_order: number }>(
+    `
     SELECT id, q_type, max_score, sort_order
     FROM questions
     WHERE bank_id = ?
     ORDER BY sort_order ASC, id ASC
-  `).all(exam.bank_id) as Array<{ id: number; q_type: string; max_score: number; sort_order: number }>;
+  `,
+    [exam.bank_id]
+  );
 
-  const sessions = db.prepare(`
+  const sessions = await db.all<any>(
+    `
     SELECT es.*, u.username, u.full_name, u.class_name
     FROM exam_sessions es
     JOIN users u ON u.id = es.student_id
     WHERE es.exam_id = ?
     ORDER BY u.class_name ASC, u.full_name ASC, es.id ASC
-  `).all(examId) as any[];
+  `,
+    [examId]
+  );
 
-  const answers = db.prepare(`
-    SELECT session_id, question_id, auto_score, manual_score, is_manually_graded
-    FROM student_answers
-    WHERE exam_id = ?
-  `).all(examId) as Array<{
+  const answers = await db.all<{
     session_id: number;
     question_id: number;
     auto_score: number;
     manual_score: number | null;
     is_manually_graded: number;
-  }>;
+  }>(
+    `
+    SELECT session_id, question_id, auto_score, manual_score, is_manually_graded
+    FROM student_answers
+    WHERE exam_id = ?
+  `,
+    [examId]
+  );
 
   const ansMap = new Map<string, number>();
   for (const a of answers) {
