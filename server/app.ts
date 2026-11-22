@@ -4,6 +4,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import fs from 'fs';
 import multer from 'multer';
 import path from 'path';
+import * as XLSX from 'xlsx';
 import {
   AuthTokenPayload,
   decryptSecret,
@@ -241,6 +242,11 @@ const uploadImageMem = multer({
 const uploadDocx = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+const uploadExcelMem = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 function buildSafeImageFilename(originalName: string): string {
@@ -681,12 +687,14 @@ export function createApp() {
         return;
       }
       try {
+        const cleanPass = String(password);
+        const cardPinEnc = role === 'siswa' ? encryptSecret(cleanPass) : '';
         const id = await db.insertReturningId(
           `
-          INSERT INTO users (username, full_name, role, class_name, password_hash, is_active, created_at)
-          VALUES (?, ?, ?, ?, ?, 1, ?)
+          INSERT INTO users (username, full_name, role, class_name, password_hash, card_pin_enc, is_active, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, 1, ?)
         `,
-          [String(username).trim(), String(fullName).trim(), role, String(className || '').trim(), hashPassword(String(password)), nowIso()]
+          [String(username).trim(), String(fullName).trim(), role, String(className || '').trim(), hashPassword(cleanPass), cardPinEnc, nowIso()]
         );
         res.json({ id });
       } catch {
@@ -706,7 +714,9 @@ export function createApp() {
         res.status(400).json({ error: 'Prefix username dan kata sandi bawaan wajib diisi.' });
         return;
       }
-      const passHash = hashPassword(String(password));
+      const cleanPass = String(password);
+      const passHash = hashPassword(cleanPass);
+      const cardPinEnc = encryptSecret(cleanPass);
       const cleanClass = String(className || 'XII').trim();
       const now = nowIso();
       let created = 0;
@@ -716,17 +726,322 @@ export function createApp() {
           const uname = `${String(prefix).trim()}${String(i).padStart(4, '0')}`;
           const info = await tx.run(
             `
-            INSERT INTO users (username, full_name, role, class_name, password_hash, is_active, created_at)
-            VALUES (?, ?, 'siswa', ?, ?, 1, ?)
+            INSERT INTO users (username, full_name, role, class_name, password_hash, card_pin_enc, is_active, created_at)
+            VALUES (?, ?, 'siswa', ?, ?, ?, 1, ?)
             ON CONFLICT DO NOTHING
           `,
-            [uname, `Peserta ${uname}`, cleanClass, passHash, now]
+            [uname, `Peserta ${uname}`, cleanClass, passHash, cardPinEnc, now]
           );
           created += info.changes;
         }
       });
 
       res.json({ created });
+    })
+  );
+
+  // Download Excel Template for Importing Accounts
+  app.get(
+    '/api/admin/users/excel-template',
+    requireAuth,
+    requireRole('admin'),
+    ah(async (_req, res) => {
+      const wb = XLSX.utils.book_new();
+      const sampleRows = [
+        {
+          Username: '2026001',
+          'Nama Lengkap': 'Ahmad Fauzi',
+          Role: 'siswa',
+          Kelas: 'XII IPA 1',
+          Password: '123456',
+        },
+        {
+          Username: '2026002',
+          'Nama Lengkap': 'Siti Aisyah',
+          Role: 'siswa',
+          Kelas: 'XII IPA 1',
+          Password: '123456',
+        },
+        {
+          Username: '2026003',
+          'Nama Lengkap': 'Budi Santoso',
+          Role: 'siswa',
+          Kelas: 'XII IPS 1',
+          Password: '',
+        },
+        {
+          Username: 'guru_mtk',
+          'Nama Lengkap': 'Dra. Ratna Dewi',
+          Role: 'guru',
+          Kelas: 'Matematika',
+          Password: 'guru2026',
+        },
+      ];
+      const wsData = XLSX.utils.json_to_sheet(sampleRows, {
+        header: ['Username', 'Nama Lengkap', 'Role', 'Kelas', 'Password'],
+      });
+      wsData['!cols'] = [
+        { wch: 18 },
+        { wch: 28 },
+        { wch: 12 },
+        { wch: 16 },
+        { wch: 16 },
+      ];
+      XLSX.utils.book_append_sheet(wb, wsData, 'Data_Akun');
+
+      const guideRows = [
+        { Kolom: 'Username', Wajib: 'Ya', Keterangan: 'Username / NIS / NIP unik untuk login (tanpa spasi disarankan).' },
+        { Kolom: 'Nama Lengkap', Wajib: 'Ya', Keterangan: 'Nama peserta / guru yang tampil di sistem dan kartu peserta.' },
+        { Kolom: 'Role', Wajib: 'Tidak (default: siswa)', Keterangan: 'Isi salah satu: siswa, guru, pengawas, atau admin.' },
+        { Kolom: 'Kelas', Wajib: 'Disarankan untuk siswa', Keterangan: 'Contoh: XII IPA 1, X TKJ 2, atau Ruang 01. Dipakai untuk filter ujian dan kartu peserta.' },
+        { Kolom: 'Password', Wajib: 'Tidak', Keterangan: 'Jika dikosongkan, sistem otomatis memakai Kata Sandi Bawaan saat import atau membuat PIN 6 digit.' },
+      ];
+      const wsGuide = XLSX.utils.json_to_sheet(guideRows);
+      wsGuide['!cols'] = [{ wch: 18 }, { wch: 24 }, { wch: 68 }];
+      XLSX.utils.book_append_sheet(wb, wsGuide, 'Petunjuk');
+
+      const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="Template_Import_Akun_MKC_CBT.xlsx"');
+      res.send(buffer);
+    })
+  );
+
+  // Import Users from Excel (.xlsx / .xls / .csv)
+  app.post(
+    '/api/admin/users/import-excel',
+    requireAuth,
+    requireRole('admin'),
+    uploadExcelMem.single('file'),
+    ah(async (req, res) => {
+      if (!req.file) {
+        res.status(400).json({ error: 'Berkas Excel (.xlsx / .xls / .csv) wajib diunggah.' });
+        return;
+      }
+      const defaultPassword = String(req.body?.defaultPassword || '').trim();
+      const duplicateMode = req.body?.duplicateMode === 'update' ? 'update' : 'skip';
+
+      let rawRows: Record<string, any>[] = [];
+      try {
+        const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+        const firstSheet = wb.SheetNames[0];
+        if (!firstSheet) {
+          res.status(400).json({ error: 'File Excel kosong atau tidak memiliki sheet.' });
+          return;
+        }
+        rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(wb.Sheets[firstSheet], { defval: '' });
+      } catch {
+        res.status(400).json({ error: 'Gagal membaca berkas Excel. Pastikan format .xlsx, .xls, atau .csv valid.' });
+        return;
+      }
+
+      if (rawRows.length === 0) {
+        res.status(400).json({ error: 'Tidak ada baris data pada sheet pertama.' });
+        return;
+      }
+      if (rawRows.length > 2000) {
+        res.status(400).json({ error: 'Maksimal 2.000 akun per kali import Excel.' });
+        return;
+      }
+
+      const normKey = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const pickField = (row: Record<string, any>, aliases: string[]): string => {
+        for (const [key, val] of Object.entries(row)) {
+          if (aliases.includes(normKey(key))) {
+            return String(val ?? '').trim();
+          }
+        }
+        return '';
+      };
+
+      const genRandomPin = () => String(Math.floor(100000 + crypto.randomInt(900000)));
+      const now = nowIso();
+      let created = 0;
+      let updated = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+
+      await db.transaction(async (tx) => {
+        for (let idx = 0; idx < rawRows.length; idx++) {
+          const rowNum = idx + 2; // Excel row number (row 1 = header)
+          const row = rawRows[idx];
+
+          const username = pickField(row, ['username', 'nis', 'nisn', 'nip', 'userid', 'kodepeserta', 'nomorpeserta', 'nopeserta']);
+          const fullName = pickField(row, ['namalengkap', 'nama', 'fullname', 'name', 'namapeserta', 'namasiswa']);
+          const rawRole = pickField(row, ['role', 'peran', 'level', 'jabatan']).toLowerCase();
+          const className = pickField(row, ['kelas', 'classname', 'class', 'ruang', 'rombel', 'kelasruang', 'mapel']);
+          const rawPass = pickField(row, ['password', 'katasandi', 'sandi', 'pin', 'pass']);
+
+          if (!username && !fullName && !className && !rawRole && !rawPass) {
+            continue; // skip completely blank row
+          }
+          if (!username || !fullName) {
+            skipped++;
+            if (errors.length < 25) {
+              errors.push(`Baris ${rowNum}: Username atau Nama Lengkap kosong.`);
+            }
+            continue;
+          }
+
+          let role: 'admin' | 'guru' | 'pengawas' | 'siswa' = 'siswa';
+          if (rawRole) {
+            if (rawRole === 'siswa' || rawRole === 'peserta' || rawRole === 'murid') role = 'siswa';
+            else if (rawRole === 'guru' || rawRole === 'pengajar') role = 'guru';
+            else if (rawRole === 'pengawas' || rawRole === 'proctor') role = 'pengawas';
+            else if (rawRole === 'admin' || rawRole === 'administrator') role = 'admin';
+            else {
+              skipped++;
+              if (errors.length < 25) {
+                errors.push(`Baris ${rowNum} (${username}): Peran "${rawRole}" tidak valid.`);
+              }
+              continue;
+            }
+          }
+
+          const finalPass = rawPass || defaultPassword || genRandomPin();
+          const passHash = hashPassword(finalPass);
+          const cardPinEnc = role === 'siswa' ? encryptSecret(finalPass) : '';
+
+          const existing = await tx.get<{ id: number; username: string }>(
+            'SELECT id, username FROM users WHERE LOWER(username) = LOWER(?)',
+            [username]
+          );
+
+          if (existing) {
+            if (duplicateMode === 'update' && existing.id !== req.user?.userId) {
+              await tx.run(
+                `
+                UPDATE users
+                SET full_name = ?, role = ?, class_name = ?, password_hash = ?, card_pin_enc = ?, is_active = 1
+                WHERE id = ?
+              `,
+                [fullName, role, className, passHash, cardPinEnc, existing.id]
+              );
+              updated++;
+            } else {
+              skipped++;
+            }
+          } else {
+            await tx.run(
+              `
+              INSERT INTO users (username, full_name, role, class_name, password_hash, card_pin_enc, is_active, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+            `,
+              [username, fullName, role, className, passHash, cardPinEnc, now]
+            );
+            created++;
+          }
+        }
+      });
+
+      res.json({
+        created,
+        updated,
+        skipped,
+        totalRows: rawRows.length,
+        errors,
+      });
+    })
+  );
+
+  // Get Participant Cards Data (with decrypted student PIN when available)
+  app.get(
+    '/api/admin/users/participant-cards',
+    requireAuth,
+    requireRole('admin'),
+    ah(async (req, res) => {
+      const classFilter = String(req.query.className || '').trim();
+      const search = String(req.query.search || '').trim().toLowerCase();
+
+      const settingRows = await db.all<{ key: string; value: string }>(
+        `SELECT key, value FROM system_settings WHERE key IN ('school_name', 'exam_event_title', 'academic_year', 'school_logo_url')`
+      );
+      const smap: Record<string, string> = {};
+      for (const s of settingRows) smap[s.key] = s.value;
+
+      const users = classFilter
+        ? await db.all<any>(
+            `SELECT id, username, full_name, role, class_name, card_pin_enc
+             FROM users
+             WHERE role = 'siswa' AND is_active = 1 AND LOWER(class_name) = LOWER(?)
+             ORDER BY class_name ASC, full_name ASC, id ASC`,
+            [classFilter]
+          )
+        : await db.all<any>(
+            `SELECT id, username, full_name, role, class_name, card_pin_enc
+             FROM users
+             WHERE role = 'siswa' AND is_active = 1
+             ORDER BY class_name ASC, full_name ASC, id ASC`
+          );
+
+      const classRows = await db.all<{ class_name: string }>(
+        `SELECT DISTINCT class_name FROM users WHERE role = 'siswa' AND is_active = 1 AND class_name <> '' ORDER BY class_name ASC`
+      );
+
+      const cards = users
+        .filter((u) => {
+          if (!search) return true;
+          return (
+            String(u.username).toLowerCase().includes(search) ||
+            String(u.full_name).toLowerCase().includes(search) ||
+            String(u.class_name || '').toLowerCase().includes(search)
+          );
+        })
+        .map((u) => ({
+          id: u.id,
+          username: u.username,
+          fullName: u.full_name,
+          className: u.class_name || '-',
+          pin: u.card_pin_enc ? decryptSecret(u.card_pin_enc) || '' : '',
+        }));
+
+      res.json({
+        school: {
+          schoolName: smap.school_name || 'SMK Teknologi MKC',
+          examEventTitle: smap.exam_event_title || 'Tes Akhir Semester',
+          academicYear: smap.academic_year || 'Tahun Pelajaran 2026/2027',
+          schoolLogoUrl: smap.school_logo_url || '',
+        },
+        classes: classRows.map((r) => r.class_name),
+        cards,
+      });
+    })
+  );
+
+  // Generate/Reset 6-digit PINs for students that don't have a stored card PIN (or all filtered students)
+  app.post(
+    '/api/admin/users/reset-student-pins',
+    requireAuth,
+    requireRole('admin'),
+    ah(async (req, res) => {
+      const onlyMissing = req.body?.onlyMissing !== false;
+      const classFilter = String(req.body?.className || '').trim();
+      const customPin = String(req.body?.customPin || '').trim();
+
+      const rows = classFilter
+        ? await db.all<{ id: number; card_pin_enc: string }>(
+            `SELECT id, card_pin_enc FROM users WHERE role = 'siswa' AND is_active = 1 AND LOWER(class_name) = LOWER(?)`,
+            [classFilter]
+          )
+        : await db.all<{ id: number; card_pin_enc: string }>(
+            `SELECT id, card_pin_enc FROM users WHERE role = 'siswa' AND is_active = 1`
+          );
+
+      let updated = 0;
+      await db.transaction(async (tx) => {
+        for (const row of rows) {
+          const hasDecryptedPin = row.card_pin_enc ? Boolean(decryptSecret(row.card_pin_enc)) : false;
+          if (onlyMissing && hasDecryptedPin) continue;
+          const pin = customPin || String(Math.floor(100000 + crypto.randomInt(900000)));
+          await tx.run(
+            `UPDATE users SET password_hash = ?, card_pin_enc = ? WHERE id = ?`,
+            [hashPassword(pin), encryptSecret(pin), row.id]
+          );
+          updated++;
+        }
+      });
+
+      res.json({ updated });
     })
   );
 

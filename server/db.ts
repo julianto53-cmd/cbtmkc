@@ -246,9 +246,12 @@ export async function initDatabase(): Promise<void> {
           role TEXT NOT NULL CHECK(role IN ('admin', 'guru', 'pengawas', 'siswa')),
           class_name TEXT NOT NULL DEFAULT '',
           password_hash TEXT NOT NULL,
+          card_pin_enc TEXT NOT NULL DEFAULT '',
           is_active INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL DEFAULT ''
         );
+
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS card_pin_enc TEXT NOT NULL DEFAULT '';
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));
 
@@ -384,6 +387,7 @@ export async function initDatabase(): Promise<void> {
           role TEXT NOT NULL CHECK(role IN ('admin', 'guru', 'pengawas', 'siswa')),
           class_name TEXT NOT NULL DEFAULT '',
           password_hash TEXT NOT NULL,
+          card_pin_enc TEXT NOT NULL DEFAULT '',
           is_active INTEGER NOT NULL DEFAULT 1,
           created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -520,6 +524,12 @@ export async function initDatabase(): Promise<void> {
       }
       if (!examColNames.has('end_at')) {
         await db.exec("ALTER TABLE exams ADD COLUMN end_at TEXT NOT NULL DEFAULT ''");
+      }
+
+      const userCols = await db.all<{ name: string }>('PRAGMA table_info(users)');
+      const userColNames = new Set(userCols.map((c) => c.name));
+      if (!userColNames.has('card_pin_enc')) {
+        await db.exec("ALTER TABLE users ADD COLUMN card_pin_enc TEXT NOT NULL DEFAULT ''");
       }
     }
 

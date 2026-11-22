@@ -46,9 +46,9 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-slate-50 flex flex-col print:bg-white">
       {/* Clean 3-Zone Top Navigation Bar */}
-      <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8 sticky top-0 z-30">
+      <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8 sticky top-0 z-30 print:hidden">
         {/* Zone 1: Single Brand Lockup */}
         <div className="flex items-center gap-2.5 whitespace-nowrap shrink-0">
           <MkcLogoMark size={30} />
@@ -82,7 +82,7 @@ export default function App() {
       </header>
 
       {/* Role-Enforced Workspace */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6">
+      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-6 print:p-0 print:max-w-none print:m-0">
         {user.role === 'admin' && <AdminPanel user={user} />}
         {user.role === 'guru' && <TeacherPanel user={user} />}
         {user.role === 'pengawas' && <ProctorPanel user={user} />}
@@ -91,7 +91,7 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-slate-200 bg-white py-3.5 px-6 text-center text-xs text-slate-500">
+      <footer className="border-t border-slate-200 bg-white py-3.5 px-6 text-center text-xs text-slate-500 print:hidden">
         Hak Cipta &copy; Fikrul MKC
       </footer>
     </div>
