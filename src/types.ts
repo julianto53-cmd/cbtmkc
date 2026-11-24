@@ -93,6 +93,7 @@ export interface StudentExamCard {
   show_result_to_student: number;
   status: string;
   target_classes?: string;
+  requires_token?: boolean;
   start_at?: string;
   end_at?: string;
   schedule_state?: 'UPCOMING' | 'OPEN' | 'EXPIRED';

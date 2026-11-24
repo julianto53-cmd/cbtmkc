@@ -93,7 +93,7 @@ export function ProctorPanel({ user }: ProctorPanelProps) {
             {exams.length === 0 && <option value="">Belum ada ujian</option>}
             {exams.map((ex) => (
               <option key={ex.id} value={ex.id}>
-                {ex.title} (Token: {ex.token_code})
+                {ex.title} ({ex.token_code ? `Token: ${ex.token_code}` : 'Tanpa Token'})
               </option>
             ))}
           </select>
@@ -127,7 +127,7 @@ export function ProctorPanel({ user }: ProctorPanelProps) {
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <div className="text-xs text-slate-500">Token Masuk Ujian</div>
               <div className="mt-1 font-mono text-2xl font-bold text-slate-900 tracking-wider">
-                {monitorData.exam.token_code}
+                {monitorData.exam.token_code || 'Tanpa Token'}
               </div>
             </div>
             <div className="rounded-xl border border-slate-200 bg-white p-4">

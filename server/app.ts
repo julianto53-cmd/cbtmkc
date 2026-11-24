@@ -1502,6 +1502,7 @@ export function createApp() {
         bankId,
         title,
         tokenCode,
+        requireToken,
         durationMinutes,
         maxViolations,
         shuffleQuestions,
@@ -1528,7 +1529,9 @@ export function createApp() {
         return;
       }
 
-      const token = String(tokenCode || crypto.randomBytes(3).toString('hex')).toUpperCase().slice(0, 10);
+      const useToken = requireToken !== false;
+      const customToken = String(tokenCode || '').trim().replace(/\s+/g, '').toUpperCase().slice(0, 10);
+      const token = useToken ? (customToken || crypto.randomBytes(3).toString('hex').toUpperCase()) : '';
       const id = await db.insertReturningId(
         `
         INSERT INTO exams (bank_id, owner_id, title, token_code, duration_minutes, max_violations, shuffle_questions, shuffle_options, show_result_to_student, status, target_classes, start_at, end_at, created_at)
@@ -1551,7 +1554,7 @@ export function createApp() {
           nowIso(),
         ]
       );
-      res.json({ id, tokenCode: token });
+      res.json({ id, tokenCode: token, requireToken: useToken });
     })
   );
 
@@ -1571,7 +1574,7 @@ export function createApp() {
         return;
       }
 
-      const { startAt, endAt, targetClasses, durationMinutes, maxViolations } = req.body || {};
+      const { startAt, endAt, targetClasses, durationMinutes, maxViolations, requireToken, tokenCode } = req.body || {};
       const cleanStart = String(startAt ?? exam.start_at ?? '').trim();
       const cleanEnd = String(endAt ?? exam.end_at ?? '').trim();
       if (cleanStart && cleanEnd && new Date(cleanEnd).getTime() <= new Date(cleanStart).getTime()) {
@@ -1582,18 +1585,25 @@ export function createApp() {
       const cleanClasses = String(targetClasses ?? exam.target_classes ?? 'ALL').trim() || 'ALL';
       const cleanDuration = durationMinutes !== undefined ? Math.max(5, Number(durationMinutes) || 60) : exam.duration_minutes;
       const cleanMaxVio = maxViolations !== undefined ? Math.max(1, Number(maxViolations) || 3) : exam.max_violations;
+      let nextToken = exam.token_code || '';
+      if (requireToken === false) {
+        nextToken = '';
+      } else if (requireToken === true) {
+        const customToken = String(tokenCode || '').trim().replace(/\s+/g, '').toUpperCase().slice(0, 10);
+        nextToken = customToken || (exam.token_code || '').trim() || crypto.randomBytes(3).toString('hex').toUpperCase();
+      }
 
       await db.run(
         `
         UPDATE exams
-        SET start_at = ?, end_at = ?, target_classes = ?, duration_minutes = ?, max_violations = ?
+        SET start_at = ?, end_at = ?, target_classes = ?, duration_minutes = ?, max_violations = ?, token_code = ?
         WHERE id = ?
       `,
-        [cleanStart, cleanEnd, cleanClasses, cleanDuration, cleanMaxVio, examId]
+        [cleanStart, cleanEnd, cleanClasses, cleanDuration, cleanMaxVio, nextToken, examId]
       );
 
       invalidateExamCacheByExamId(examId);
-      res.json({ ok: true });
+      res.json({ ok: true, tokenCode: nextToken });
     })
   );
 
@@ -2069,7 +2079,7 @@ export function createApp() {
       const studentClass = req.user!.className || '';
       const rawExams = await db.all<any>(
         `
-        SELECT e.id, e.title, e.duration_minutes, e.max_violations, e.show_result_to_student, e.status, e.target_classes, e.start_at, e.end_at,
+        SELECT e.id, e.title, e.token_code, e.duration_minutes, e.max_violations, e.show_result_to_student, e.status, e.target_classes, e.start_at, e.end_at,
                qb.subject,
                (SELECT COUNT(*) FROM questions q WHERE q.bank_id = e.bank_id) as question_count,
                es.id as session_id, es.status as session_status, es.violation_count, es.final_score, es.submitted_at
@@ -2084,8 +2094,9 @@ export function createApp() {
 
       const exams = rawExams
         .filter((ex) => ex.session_id !== null || isClassAllowed(ex.target_classes, studentClass))
-        .map((ex) => ({
+        .map(({ token_code, ...ex }) => ({
           ...ex,
+          requires_token: Boolean(token_code && String(token_code).trim().length > 0),
           schedule_state: computeScheduleState(ex.start_at || '', ex.end_at || ''),
         }));
 
@@ -2129,7 +2140,8 @@ export function createApp() {
           res.status(403).json({ error: 'Batas jadwal pelaksanaan ujian sudah berakhir.' });
           return;
         }
-        if (String(tokenCode || '').trim().toUpperCase() !== cached.tokenCode.toUpperCase()) {
+        const expectedToken = String(cached.tokenCode || '').trim().toUpperCase();
+        if (expectedToken && String(tokenCode || '').trim().toUpperCase() !== expectedToken) {
           res.status(403).json({ error: 'Token ujian tidak sesuai. Periksa kembali token dari pengawas.' });
           return;
         }

@@ -253,7 +253,7 @@ export function StudentPortal({ user, prefillTokenCode = '', onExamLockChange }:
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {!exam.session_id && (
+                      {!exam.session_id && exam.requires_token !== false && (
                         <div>
                           <label className="block text-xs font-medium text-slate-700 mb-1">Token Ujian dari Pengawas</label>
                           <input
@@ -263,6 +263,11 @@ export function StudentPortal({ user, prefillTokenCode = '', onExamLockChange }:
                             onChange={(e) => setTokenInputs((prev) => ({ ...prev, [exam.id]: e.target.value.toUpperCase() }))}
                             className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-emerald-600"
                           />
+                        </div>
+                      )}
+                      {!exam.session_id && exam.requires_token === false && (
+                        <div className="p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/70 text-xs text-emerald-900">
+                          Ujian ini <strong>tanpa token</strong>. Klik tombol di bawah untuk langsung memulai.
                         </div>
                       )}
 

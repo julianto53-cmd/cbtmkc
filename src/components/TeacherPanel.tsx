@@ -92,6 +92,8 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   const [examEndAt, setExamEndAt] = useState('');
   const [examAllClasses, setExamAllClasses] = useState(true);
   const [examSelectedClasses, setExamSelectedClasses] = useState<string[]>([]);
+  const [examRequireToken, setExamRequireToken] = useState(true);
+  const [examTokenCode, setExamTokenCode] = useState('');
   const [availableClasses, setAvailableClasses] = useState<Array<{ class_name: string; student_count: number }>>([]);
 
   // Edit Exam Schedule & Classes Form
@@ -100,6 +102,8 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   const [editEndAt, setEditEndAt] = useState('');
   const [editAllClasses, setEditAllClasses] = useState(true);
   const [editSelectedClasses, setEditSelectedClasses] = useState<string[]>([]);
+  const [editRequireToken, setEditRequireToken] = useState(true);
+  const [editTokenCode, setEditTokenCode] = useState('');
   const [confirmDeleteExamId, setConfirmDeleteExamId] = useState<number | null>(null);
 
   // Grading State
@@ -340,11 +344,13 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
     }
     const targetClasses = examAllClasses ? 'ALL' : examSelectedClasses.join(', ');
     try {
-      const data = await apiFetch<{ id: number; tokenCode: string }>('/api/teacher/exams', {
+      const data = await apiFetch<{ id: number; tokenCode: string; requireToken?: boolean }>('/api/teacher/exams', {
         method: 'POST',
         body: JSON.stringify({
           bankId: examBankId || selectedBankId,
           title: examTitle,
+          requireToken: examRequireToken,
+          tokenCode: examRequireToken ? examTokenCode : '',
           durationMinutes: examDuration,
           maxViolations: examMaxViolations,
           shuffleQuestions: examShuffle,
@@ -361,7 +367,13 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
       setExamEndAt('');
       setExamAllClasses(true);
       setExamSelectedClasses([]);
-      setStatusMsg(`Jadwal ujian aktif dibuat dengan token: ${data.tokenCode}`);
+      setExamRequireToken(true);
+      setExamTokenCode('');
+      setStatusMsg(
+        data.tokenCode
+          ? `Jadwal ujian aktif dibuat dengan token: ${data.tokenCode}`
+          : 'Jadwal ujian aktif dibuat (Tanpa Token — peserta dapat langsung masuk).'
+      );
       await loadBanksAndExams();
     } catch (err: any) {
       setErrorMsg(err.message);
@@ -381,10 +393,12 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
           startAt: toIsoOrEmpty(editStartAt),
           endAt: toIsoOrEmpty(editEndAt),
           targetClasses: editAllClasses ? 'ALL' : editSelectedClasses.join(', '),
+          requireToken: editRequireToken,
+          tokenCode: editRequireToken ? editTokenCode : '',
         }),
       });
       setEditingExamId(null);
-      setStatusMsg('Jadwal dan target kelas ujian berhasil diperbarui.');
+      setStatusMsg('Jadwal, pengaturan token, dan target kelas ujian berhasil diperbarui.');
       await loadBanksAndExams();
     } catch (err: any) {
       setErrorMsg(err.message);
@@ -1158,6 +1172,48 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                 </p>
               </div>
 
+              {/* Pengaturan Token Masuk Ujian */}
+              <div className="md:col-span-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1.5">
+                  <div className="text-xs font-semibold text-slate-800">Keamanan Akses Token Ujian</div>
+                  <div className="flex flex-wrap items-center gap-4 text-xs">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="create-exam-token-mode"
+                        checked={examRequireToken}
+                        onChange={() => setExamRequireToken(true)}
+                      />
+                      <span>Memakai Token Ujian</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="create-exam-token-mode"
+                        checked={!examRequireToken}
+                        onChange={() => setExamRequireToken(false)}
+                      />
+                      <span>Tidak Memakai Token (Siswa langsung mulai)</span>
+                    </label>
+                  </div>
+                </div>
+                {examRequireToken && (
+                  <div className="sm:w-64">
+                    <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                      Kode Token (opsional, kosongkan = acak)
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={10}
+                      placeholder="Contoh: UJIAN26"
+                      value={examTokenCode}
+                      onChange={(e) => setExamTokenCode(e.target.value.toUpperCase().replace(/\s+/g, ''))}
+                      className="w-full px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-mono uppercase"
+                    />
+                  </div>
+                )}
+              </div>
+
               {/* Pemilihan Kelas Sesuai Daftar Pengguna */}
               <div className="md:col-span-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1249,7 +1305,13 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                   <div>
                     <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
                       <span>{ex.subject} · {ex.duration_minutes} Menit</span>
-                      <span className="font-mono font-bold text-emerald-800">Token: {ex.token_code}</span>
+                      {ex.token_code ? (
+                        <span className="font-mono font-bold text-emerald-800">Token: {ex.token_code}</span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-medium text-[11px]">
+                          Tanpa Token
+                        </span>
+                      )}
                     </div>
                     <h3 className="font-display font-bold text-base text-slate-900">{ex.title}</h3>
                     <div className="mt-2.5 text-xs text-slate-600 space-y-1">
@@ -1345,6 +1407,36 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                           </div>
                         )}
                       </div>
+                      <div className="pt-2 border-t border-slate-200 space-y-2">
+                        <div className="flex flex-wrap items-center gap-4">
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              checked={editRequireToken}
+                              onChange={() => setEditRequireToken(true)}
+                            />
+                            <span>Memakai Token</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer">
+                            <input
+                              type="radio"
+                              checked={!editRequireToken}
+                              onChange={() => setEditRequireToken(false)}
+                            />
+                            <span>Tidak Memakai Token</span>
+                          </label>
+                        </div>
+                        {editRequireToken && (
+                          <input
+                            type="text"
+                            maxLength={10}
+                            placeholder="Kode Token (kosongkan untuk acak)"
+                            value={editTokenCode}
+                            onChange={(e) => setEditTokenCode(e.target.value.toUpperCase().replace(/\s+/g, ''))}
+                            className="w-full sm:w-56 px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono text-xs uppercase"
+                          />
+                        )}
+                      </div>
                       <div className="flex justify-end gap-2">
                         <button
                           type="button"
@@ -1386,6 +1478,9 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                                 ? []
                                 : ex.target_classes.split(',').map((s) => s.trim()).filter(Boolean)
                             );
+                            const hasTok = Boolean(ex.token_code && ex.token_code.trim());
+                            setEditRequireToken(hasTok);
+                            setEditTokenCode(ex.token_code || '');
                           }
                         }}
                         className="px-3 py-1.5 rounded border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
