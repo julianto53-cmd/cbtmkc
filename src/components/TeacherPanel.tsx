@@ -8,6 +8,7 @@ import {
   FileText,
   ImagePlus,
   Lock,
+  Pencil,
   Plus,
   RefreshCw,
   ShieldCheck,
@@ -79,6 +80,24 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   const [qJodohPairs, setQJodohPairs] = useState<Record<string, string>>({ L1: 'R1', L2: 'R2' });
   const [qIsianAccepted, setQIsianAccepted] = useState('');
   const [qEsaiRef, setQEsaiRef] = useState('');
+
+  // Inline Edit Question Form
+  const [editingQuestionId, setEditingQuestionId] = useState<number | null>(null);
+  const [editQType, setEditQType] = useState<QuestionType>('PG');
+  const [editQPrompt, setEditQPrompt] = useState('');
+  const [editQImageUrl, setEditQImageUrl] = useState('');
+  const [editQMaxScore, setEditQMaxScore] = useState(10);
+  const [editQPgOptions, setEditQPgOptions] = useState<Array<{ id: string; text: string }>>([]);
+  const [editQPgCorrect, setEditQPgCorrect] = useState('A');
+  const [editQPgkCorrect, setEditQPgkCorrect] = useState<string[]>([]);
+  const [editQBsStatements, setEditQBsStatements] = useState<Array<{ id: string; statement: string }>>([]);
+  const [editQBsCorrect, setEditQBsCorrect] = useState<Record<string, string>>({});
+  const [editQJodohLeft, setEditQJodohLeft] = useState<Array<{ id: string; text: string }>>([]);
+  const [editQJodohRight, setEditQJodohRight] = useState<Array<{ id: string; text: string }>>([]);
+  const [editQJodohPairs, setEditQJodohPairs] = useState<Record<string, string>>({});
+  const [editQIsianAccepted, setEditQIsianAccepted] = useState('');
+  const [editQEsaiRef, setEditQEsaiRef] = useState('');
+  const [savingQuestionEdit, setSavingQuestionEdit] = useState(false);
 
   // Create Exam Form
   const [showNewExam, setShowNewExam] = useState(false);
@@ -171,6 +190,7 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
   }, [loadBanksAndExams]);
 
   useEffect(() => {
+    setEditingQuestionId(null);
     if (selectedBankId) loadBankDetail(selectedBankId);
   }, [selectedBankId, loadBankDetail]);
 
@@ -271,9 +291,146 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
     }
   };
 
+  const parseJsonSafe = (raw: string, fallback: any) => {
+    try {
+      return raw ? JSON.parse(raw) : fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const startEditQuestion = (q: QuestionItem) => {
+    const opts = parseJsonSafe(q.options_json, {});
+    const key = parseJsonSafe(q.answer_key_json, {});
+
+    setEditingQuestionId(q.id);
+    setEditQType(q.q_type);
+    setEditQPrompt(q.prompt_text || '');
+    setEditQImageUrl(q.image_url || '');
+    setEditQMaxScore(Number(q.max_score) || 10);
+
+    const optList: Array<{ id: string; text: string }> = Array.isArray(opts)
+      ? opts
+      : Array.isArray(opts?.options)
+        ? opts.options
+        : [];
+    const optMap = new Map(optList.map((o) => [String(o.id).toUpperCase(), String(o.text || '')]));
+    const baseIds = ['A', 'B', 'C', 'D', 'E'];
+    const mergedIds = [...baseIds];
+    for (const o of optList) {
+      const oid = String(o.id).toUpperCase();
+      if (oid && !mergedIds.includes(oid)) mergedIds.push(oid);
+    }
+    setEditQPgOptions(mergedIds.map((id) => ({ id, text: optMap.get(id) || '' })));
+    setEditQPgCorrect(String(key?.correct || 'A').toUpperCase());
+    setEditQPgkCorrect(
+      Array.isArray(key?.correct) ? key.correct.map((x: any) => String(x).toUpperCase()) : ['A']
+    );
+
+    const bsList: Array<{ id: string; statement: string }> = Array.isArray(opts)
+      ? opts.map((s: any, i: number) => ({ id: String(s.id || i + 1), statement: String(s.statement || s.text || '') }))
+      : [
+          { id: '1', statement: '' },
+          { id: '2', statement: '' },
+        ];
+    setEditQBsStatements(
+      bsList.length > 0
+        ? bsList
+        : [
+            { id: '1', statement: '' },
+            { id: '2', statement: '' },
+          ]
+    );
+    setEditQBsCorrect(key?.correct && typeof key.correct === 'object' ? key.correct : { '1': 'B', '2': 'S' });
+
+    const leftArr: Array<{ id: string; text: string }> = Array.isArray(opts?.left)
+      ? opts.left
+      : [
+          { id: 'L1', text: '' },
+          { id: 'L2', text: '' },
+        ];
+    const rightArr: Array<{ id: string; text: string }> = Array.isArray(opts?.right)
+      ? opts.right
+      : [
+          { id: 'R1', text: '' },
+          { id: 'R2', text: '' },
+        ];
+    setEditQJodohLeft(leftArr);
+    setEditQJodohRight(rightArr);
+    setEditQJodohPairs(key?.pairs && typeof key.pairs === 'object' ? key.pairs : { L1: 'R1', L2: 'R2' });
+
+    setEditQIsianAccepted(Array.isArray(key?.accepted) ? key.accepted.join(' | ') : '');
+    setEditQEsaiRef(String(key?.referenceAnswer || ''));
+  };
+
+  const handleUploadEditImage = async (file: File) => {
+    const fd = new FormData();
+    fd.append('image', file);
+    const data = await apiFetch<{ imageUrl: string }>('/api/teacher/questions/upload-image', {
+      method: 'POST',
+      body: fd,
+    });
+    setEditQImageUrl(data.imageUrl);
+  };
+
+  const handleSaveEditQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingQuestionId || !selectedBankId) return;
+    setErrorMsg('');
+    setSavingQuestionEdit(true);
+
+    let options: any = {};
+    let answerKey: any = {};
+    if (editQType === 'PG') {
+      options = editQPgOptions.filter((o) => o.text.trim());
+      answerKey = { correct: editQPgCorrect };
+    } else if (editQType === 'PGK') {
+      options = editQPgOptions.filter((o) => o.text.trim());
+      answerKey = { correct: editQPgkCorrect, partialCredit: true };
+    } else if (editQType === 'BS') {
+      options = editQBsStatements.filter((s) => s.statement.trim());
+      answerKey = { correct: editQBsCorrect };
+    } else if (editQType === 'JODOH') {
+      options = {
+        left: editQJodohLeft.filter((l) => l.text.trim()),
+        right: editQJodohRight.filter((r) => r.text.trim()),
+      };
+      answerKey = { pairs: editQJodohPairs };
+    } else if (editQType === 'ISIAN') {
+      options = { caseSensitive: false };
+      answerKey = { accepted: editQIsianAccepted.split('|').map((s) => s.trim()).filter(Boolean) };
+    } else {
+      options = { rubric: 'Penilaian manual guru' };
+      answerKey = { referenceAnswer: editQEsaiRef };
+    }
+
+    try {
+      await apiFetch(`/api/teacher/questions/${editingQuestionId}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          qType: editQType,
+          promptText: editQPrompt,
+          imageUrl: editQImageUrl,
+          options,
+          answerKey,
+          maxScore: editQMaxScore,
+        }),
+      });
+      setEditingQuestionId(null);
+      setStatusMsg('Soal berhasil diperbarui.');
+      await loadBankDetail(selectedBankId);
+      await loadBanksAndExams();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Gagal memperbarui soal.');
+    } finally {
+      setSavingQuestionEdit(false);
+    }
+  };
+
   const handleDeleteQuestion = async (qId: number) => {
     if (!selectedBankId) return;
     await apiFetch(`/api/teacher/questions/${qId}`, { method: 'DELETE' });
+    if (editingQuestionId === qId) setEditingQuestionId(null);
     await loadBankDetail(selectedBankId);
     await loadBanksAndExams();
   };
@@ -1037,37 +1194,443 @@ export function TeacherPanel({ user }: TeacherPanelProps) {
                       Bank soal ini masih kosong. Tambahkan soal secara manual atau import dari file Word (.docx).
                     </div>
                   ) : (
-                    questions.map((q, idx) => (
-                      <div key={q.id} className="rounded-xl border border-slate-200 bg-white p-5">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="space-y-2 flex-1">
-                            <div className="text-xs text-slate-500 font-mono">
-                              No. {idx + 1} · {q.q_type} · Bobot {q.max_score}
+                    questions.map((q, idx) => {
+                      const opts = parseJsonSafe(q.options_json, {});
+                      const keyObj = parseJsonSafe(q.answer_key_json, {});
+                      const pgList: Array<{ id: string; text: string }> = Array.isArray(opts)
+                        ? opts
+                        : Array.isArray(opts?.options)
+                          ? opts.options
+                          : [];
+                      const isEditingThis = editingQuestionId === q.id;
+
+                      return (
+                        <div key={q.id} className="rounded-xl border border-slate-200 bg-white p-5">
+                          {isEditingThis ? (
+                            <form onSubmit={handleSaveEditQuestion} className="space-y-4">
+                              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                                <h3 className="font-display font-bold text-sm text-emerald-900">
+                                  Edit Soal No. {idx + 1}
+                                </h3>
+                                <div className="flex items-center gap-2">
+                                  <select
+                                    value={editQType}
+                                    onChange={(e) => setEditQType(e.target.value as QuestionType)}
+                                    className="px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-medium bg-white"
+                                  >
+                                    <option value="PG">PG (Pilihan Ganda)</option>
+                                    <option value="PGK">PGK (PG Kompleks)</option>
+                                    <option value="BS">BS (Benar / Salah)</option>
+                                    <option value="JODOH">JODOH (Menjodohkan)</option>
+                                    <option value="ISIAN">ISIAN (Isian Singkat)</option>
+                                    <option value="ESAI">ESAI (Uraian)</option>
+                                  </select>
+                                  <input
+                                    type="number"
+                                    min={1}
+                                    value={editQMaxScore}
+                                    onChange={(e) => setEditQMaxScore(Number(e.target.value) || 10)}
+                                    className="w-20 px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-mono"
+                                    title="Bobot Skor"
+                                  />
+                                </div>
+                              </div>
+
+                              <div>
+                                <label className="block text-xs font-medium text-slate-700 mb-1">
+                                  Pertanyaan / Stimulus Soal
+                                </label>
+                                <textarea
+                                  rows={3}
+                                  required
+                                  value={editQPrompt}
+                                  onChange={(e) => setEditQPrompt(e.target.value)}
+                                  className="w-full px-3.5 py-2.5 rounded-lg border border-slate-300 text-sm"
+                                />
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-3">
+                                <label className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 cursor-pointer">
+                                  <ImagePlus className="w-4 h-4" />
+                                  <span>{editQImageUrl ? 'Ganti Gambar Soal' : 'Unggah Gambar Soal'}</span>
+                                  <input
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const f = e.target.files?.[0];
+                                      if (f) handleUploadEditImage(f);
+                                    }}
+                                  />
+                                </label>
+                                {editQImageUrl && (
+                                  <div className="flex items-center gap-2">
+                                    <img
+                                      src={editQImageUrl}
+                                      alt="Preview gambar edit"
+                                      referrerPolicy="no-referrer"
+                                      className="h-12 rounded border border-slate-200"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditQImageUrl('')}
+                                      className="text-xs text-red-600 underline"
+                                    >
+                                      Hapus Gambar
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+
+                              {(editQType === 'PG' || editQType === 'PGK') && (
+                                <div className="space-y-2">
+                                  <div className="text-xs font-medium text-slate-700">
+                                    Opsi Jawaban &amp; Kunci ({editQType === 'PG' ? 'Pilih 1 Kunci' : 'Centang Beberapa Kunci'})
+                                  </div>
+                                  {editQPgOptions.map((opt, oIdx) => (
+                                    <div key={opt.id} className="flex items-center gap-2">
+                                      {editQType === 'PG' ? (
+                                        <input
+                                          type="radio"
+                                          name={`edit-pg-correct-${q.id}`}
+                                          checked={editQPgCorrect === opt.id}
+                                          onChange={() => setEditQPgCorrect(opt.id)}
+                                        />
+                                      ) : (
+                                        <input
+                                          type="checkbox"
+                                          checked={editQPgkCorrect.includes(opt.id)}
+                                          onChange={() =>
+                                            setEditQPgkCorrect((prev) =>
+                                              prev.includes(opt.id) ? prev.filter((x) => x !== opt.id) : [...prev, opt.id]
+                                            )
+                                          }
+                                        />
+                                      )}
+                                      <span className="font-mono text-xs font-bold w-5">{opt.id}.</span>
+                                      <input
+                                        type="text"
+                                        placeholder={`Teks opsi ${opt.id}`}
+                                        value={opt.text}
+                                        onChange={(e) =>
+                                          setEditQPgOptions((prev) =>
+                                            prev.map((x, i) => (i === oIdx ? { ...x, text: e.target.value } : x))
+                                          )
+                                        }
+                                        className="flex-1 px-3 py-1.5 rounded border border-slate-300 text-xs"
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {editQType === 'BS' && (
+                                <div className="space-y-2">
+                                  <div className="text-xs font-medium text-slate-700">Daftar Pernyataan &amp; Kunci (B/S)</div>
+                                  {editQBsStatements.map((st, sIdx) => (
+                                    <div key={st.id} className="flex items-center gap-2">
+                                      <span className="font-mono text-xs w-6">{st.id})</span>
+                                      <input
+                                        type="text"
+                                        placeholder="Tulis pernyataan..."
+                                        value={st.statement}
+                                        onChange={(e) =>
+                                          setEditQBsStatements((prev) =>
+                                            prev.map((x, i) => (i === sIdx ? { ...x, statement: e.target.value } : x))
+                                          )
+                                        }
+                                        className="flex-1 px-3 py-1.5 rounded border border-slate-300 text-xs"
+                                      />
+                                      <select
+                                        value={editQBsCorrect[st.id] || 'B'}
+                                        onChange={(e) =>
+                                          setEditQBsCorrect((prev) => ({ ...prev, [st.id]: e.target.value }))
+                                        }
+                                        className="px-2 py-1.5 rounded border border-slate-300 text-xs font-mono"
+                                      >
+                                        <option value="B">Benar (B)</option>
+                                        <option value="S">Salah (S)</option>
+                                      </select>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {editQType === 'JODOH' && (
+                                <div className="space-y-2">
+                                  <div className="text-xs font-medium text-slate-700">Pasangan Kiri &amp; Kanan</div>
+                                  {editQJodohLeft.map((l, lIdx) => (
+                                    <div key={l.id} className="grid grid-cols-12 gap-2 items-center">
+                                      <input
+                                        type="text"
+                                        placeholder={`Kiri (${l.id})`}
+                                        value={l.text}
+                                        onChange={(e) =>
+                                          setEditQJodohLeft((prev) =>
+                                            prev.map((x, i) => (i === lIdx ? { ...x, text: e.target.value } : x))
+                                          )
+                                        }
+                                        className="col-span-5 px-3 py-1.5 rounded border border-slate-300 text-xs"
+                                      />
+                                      <span className="col-span-1 text-center text-xs text-slate-400">→</span>
+                                      <input
+                                        type="text"
+                                        placeholder={`Kanan (R${lIdx + 1})`}
+                                        value={editQJodohRight[lIdx]?.text || ''}
+                                        onChange={(e) =>
+                                          setEditQJodohRight((prev) =>
+                                            prev.map((x, i) => (i === lIdx ? { ...x, text: e.target.value } : x))
+                                          )
+                                        }
+                                        className="col-span-4 px-3 py-1.5 rounded border border-slate-300 text-xs"
+                                      />
+                                      <select
+                                        value={editQJodohPairs[l.id] || `R${lIdx + 1}`}
+                                        onChange={(e) =>
+                                          setEditQJodohPairs((prev) => ({ ...prev, [l.id]: e.target.value }))
+                                        }
+                                        className="col-span-2 px-2 py-1.5 rounded border border-slate-300 text-xs font-mono"
+                                      >
+                                        {editQJodohRight.map((r) => (
+                                          <option key={r.id} value={r.id}>{r.id}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              {editQType === 'ISIAN' && (
+                                <div>
+                                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                                    Kunci Jawaban Diterima (pisahkan variasi dengan tanda |)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={editQIsianAccepted}
+                                    onChange={(e) => setEditQIsianAccepted(e.target.value)}
+                                    className="w-full px-3 py-2 rounded border border-slate-300 text-xs"
+                                  />
+                                </div>
+                              )}
+
+                              {editQType === 'ESAI' && (
+                                <div>
+                                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                                    Pedoman / Referensi Jawaban Esai
+                                  </label>
+                                  <textarea
+                                    rows={2}
+                                    value={editQEsaiRef}
+                                    onChange={(e) => setEditQEsaiRef(e.target.value)}
+                                    className="w-full px-3 py-2 rounded border border-slate-300 text-xs"
+                                  />
+                                </div>
+                              )}
+
+                              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingQuestionId(null)}
+                                  className="px-4 py-2 rounded-lg border border-slate-300 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                >
+                                  Batal
+                                </button>
+                                <button
+                                  type="submit"
+                                  disabled={savingQuestionEdit}
+                                  className="px-4 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 disabled:opacity-60 text-white text-xs font-medium"
+                                >
+                                  {savingQuestionEdit ? 'Menyimpan...' : 'Simpan Perubahan'}
+                                </button>
+                              </div>
+                            </form>
+                          ) : (
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="space-y-2.5 flex-1 min-w-0">
+                                <div className="text-xs text-slate-500 font-mono">
+                                  No. {idx + 1} · {q.q_type} · Bobot {q.max_score}
+                                </div>
+                                <div className="text-sm text-slate-900 whitespace-pre-line">{q.prompt_text}</div>
+                                {q.image_url && (
+                                  <img
+                                    src={q.image_url}
+                                    alt={`Gambar soal ${idx + 1}`}
+                                    referrerPolicy="no-referrer"
+                                    className="max-h-40 rounded border border-slate-200 object-contain"
+                                  />
+                                )}
+
+                                {/* Pilihan Jawaban A, B, C, D, E untuk PG & PGK */}
+                                {(q.q_type === 'PG' || q.q_type === 'PGK') && pgList.length > 0 && (
+                                  <div className="space-y-1.5 pt-1">
+                                    {pgList.map((opt) => {
+                                      const oid = String(opt.id || '').toUpperCase();
+                                      const isCorrect =
+                                        q.q_type === 'PG'
+                                          ? String(keyObj?.correct || '').toUpperCase() === oid
+                                          : Array.isArray(keyObj?.correct) &&
+                                            keyObj.correct.map((x: any) => String(x).toUpperCase()).includes(oid);
+                                      return (
+                                        <div
+                                          key={oid}
+                                          className={`flex items-start justify-between gap-2 px-3 py-1.5 rounded-lg border text-xs ${
+                                            isCorrect
+                                              ? 'border-emerald-300 bg-emerald-50 text-emerald-950 font-medium'
+                                              : 'border-slate-200 bg-slate-50/70 text-slate-700'
+                                          }`}
+                                        >
+                                          <div className="leading-relaxed">
+                                            <span className="font-mono font-bold mr-1.5">{oid}.</span>
+                                            <span>{opt.text}</span>
+                                          </div>
+                                          {isCorrect && (
+                                            <span className="shrink-0 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800">
+                                              <CheckCircle2 className="w-3.5 h-3.5" />
+                                              <span>Kunci</span>
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* Pernyataan Benar/Salah */}
+                                {q.q_type === 'BS' && Array.isArray(opts) && opts.length > 0 && (
+                                  <div className="space-y-1.5 pt-1">
+                                    {opts.map((st: any, sIdx: number) => {
+                                      const sid = String(st.id || sIdx + 1);
+                                      const ans = String(keyObj?.correct?.[sid] || '-').toUpperCase();
+                                      return (
+                                        <div
+                                          key={sid}
+                                          className="flex items-center justify-between gap-3 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50/70 text-xs"
+                                        >
+                                          <span className="text-slate-700">
+                                            <span className="font-mono font-semibold mr-1.5">{sid})</span>
+                                            {st.statement || st.text}
+                                          </span>
+                                          <span
+                                            className={`shrink-0 px-2 py-0.5 rounded font-mono font-semibold text-[11px] ${
+                                              ans === 'B'
+                                                ? 'bg-emerald-100 text-emerald-800'
+                                                : ans === 'S'
+                                                  ? 'bg-rose-100 text-rose-800'
+                                                  : 'bg-slate-200 text-slate-700'
+                                            }`}
+                                          >
+                                            {ans === 'B' ? 'Benar' : ans === 'S' ? 'Salah' : ans}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* Pasangan Menjodohkan */}
+                                {q.q_type === 'JODOH' && Array.isArray(opts?.left) && (
+                                  <div className="space-y-1.5 pt-1">
+                                    {opts.left.map((l: any) => {
+                                      const targetId = keyObj?.pairs?.[l.id];
+                                      const rightObj = Array.isArray(opts?.right)
+                                        ? opts.right.find((r: any) => r.id === targetId)
+                                        : null;
+                                      return (
+                                        <div
+                                          key={l.id}
+                                          className="flex flex-wrap items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50/70 text-xs text-slate-700"
+                                        >
+                                          <span className="font-medium text-slate-900">{l.text}</span>
+                                          <span className="text-slate-400">→</span>
+                                          <span className="font-medium text-emerald-800">
+                                            {rightObj ? rightObj.text : targetId || '-'}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+
+                                {/* Kunci Jawaban Ringkas */}
+                                <div className="text-xs text-slate-600 bg-slate-50 px-2.5 py-1.5 rounded border border-slate-100">
+                                  {q.q_type === 'PG' && (
+                                    <span>
+                                      Kunci Jawaban: <strong className="font-mono text-emerald-800">{keyObj?.correct || '-'}</strong>
+                                    </span>
+                                  )}
+                                  {q.q_type === 'PGK' && (
+                                    <span>
+                                      Kunci Jawaban:{' '}
+                                      <strong className="font-mono text-emerald-800">
+                                        {Array.isArray(keyObj?.correct) ? keyObj.correct.join(', ') : '-'}
+                                      </strong>
+                                    </span>
+                                  )}
+                                  {q.q_type === 'BS' && (
+                                    <span>
+                                      Kunci B/S:{' '}
+                                      <strong className="font-mono text-emerald-800">
+                                        {keyObj?.correct && typeof keyObj.correct === 'object'
+                                          ? Object.entries(keyObj.correct)
+                                              .map(([k, v]) => `${k}=${v}`)
+                                              .join(', ')
+                                          : '-'}
+                                      </strong>
+                                    </span>
+                                  )}
+                                  {q.q_type === 'JODOH' && (
+                                    <span>
+                                      Kunci Pasangan:{' '}
+                                      <strong className="font-mono text-emerald-800">
+                                        {keyObj?.pairs && typeof keyObj.pairs === 'object'
+                                          ? Object.entries(keyObj.pairs)
+                                              .map(([k, v]) => `${k}→${v}`)
+                                              .join(', ')
+                                          : '-'}
+                                      </strong>
+                                    </span>
+                                  )}
+                                  {q.q_type === 'ISIAN' && (
+                                    <span>
+                                      Kunci Jawaban:{' '}
+                                      <strong className="font-mono text-emerald-800">
+                                        {Array.isArray(keyObj?.accepted) ? keyObj.accepted.join(' | ') : '-'}
+                                      </strong>
+                                    </span>
+                                  )}
+                                  {q.q_type === 'ESAI' && (
+                                    <span>
+                                      Pedoman Jawaban: <span className="text-slate-800">{keyObj?.referenceAnswer || 'Penilaian manual guru'}</span>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => startEditQuestion(q)}
+                                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:text-emerald-800 hover:border-emerald-300 hover:bg-emerald-50 text-xs font-medium inline-flex items-center gap-1"
+                                  title="Edit soal"
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                  <span>Edit</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteQuestion(q.id)}
+                                  className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50"
+                                  title="Hapus soal"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
                             </div>
-                            <div className="text-sm text-slate-900 whitespace-pre-line">{q.prompt_text}</div>
-                            {q.image_url && (
-                              <img
-                                src={q.image_url}
-                                alt={`Gambar soal ${idx + 1}`}
-                                referrerPolicy="no-referrer"
-                                className="max-h-40 rounded border border-slate-200 object-contain"
-                              />
-                            )}
-                            <div className="text-xs text-slate-500 font-mono bg-slate-50 px-2.5 py-1.5 rounded border border-slate-100">
-                              Kunci: {q.answer_key_json}
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteQuestion(q.id)}
-                            className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50"
-                            title="Hapus soal"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          )}
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </>
